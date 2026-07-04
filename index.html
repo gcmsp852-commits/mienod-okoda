@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>QR Matrix Reader</title>
+  <script src="jsQR.js"></script>
+  <style>
+    :root {
+      --bg: #101416;
+      --panel: #182024;
+      --panel2: #0b1012;
+      --ink: #f5fbff;
+      --muted: #98a8af;
+      --accent: #00bcd4;
+      --accent2: #4dd0e1;
+      --ok: #00e676;
+      --warn: #ffb300;
+      --bad: #ff5252;
+      --line: #27343a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100dvh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    .header {
+      padding: 14px 16px;
+      text-align: center;
+      background: #142027;
+      border-bottom: 1px solid var(--line);
+      font-weight: 700;
+      letter-spacing: 0;
+      box-shadow: 0 2px 12px rgba(0,0,0,.35);
+      z-index: 5;
+    }
+    .camera {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    video, #overlayCanvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    video { z-index: 1; }
+    #overlayCanvas { z-index: 2; pointer-events: none; }
+    #workCanvas { display: none; }
+    .bottom {
+      padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+      background: var(--panel);
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 10px;
+      z-index: 4;
+    }
+    .status { color: var(--accent2); font-size: .94rem; text-align: center; min-height: 1.4em; }
+    .phasebar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .phase {
+      border: 1px solid var(--line);
+      color: var(--muted);
+      padding: 7px 4px;
+      text-align: center;
+      border-radius: 6px;
+      font-size: .78rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .phase.active { border-color: var(--accent); color: var(--accent2); background: rgba(0,188,212,.08); }
+    .btnrow { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 12px 18px;
+      background: var(--accent);
+      color: #062027;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.secondary { background: #334047; color: var(--ink); }
+    button:disabled { opacity: .45; cursor: default; }
+    .overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(0,0,0,.86);
+    }
+    .box {
+      width: min(540px, 100%);
+      max-height: calc(100dvh - 36px);
+      overflow: auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px;
+      display: grid;
+      gap: 12px;
+      box-shadow: 0 16px 50px rgba(0,0,0,.45);
+    }
+    h2 { margin: 0; color: var(--accent2); font-size: 1.25rem; }
+    p { margin: 0; color: var(--muted); line-height: 1.45; }
+    input {
+      width: 100%;
+      border: 1px solid #3a4a50;
+      background: #030506;
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 1.05rem;
+      text-align: center;
+    }
+    .card {
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      display: grid;
+      gap: 5px;
+    }
+    .card label { color: var(--muted); font-size: .78rem; }
+    .text { word-break: break-all; font-family: ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+    .meta { color: var(--accent2); font-size: .82rem; }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+  </style>
+</head>
+<body>
+  <div class="header">QR Matrix Reader</div>
+  <div class="camera">
+    <video id="camera" playsinline autoplay muted></video>
+    <canvas id="overlayCanvas"></canvas>
+    <canvas id="workCanvas"></canvas>
+  </div>
+  <div class="bottom">
+    <div class="status" id="statusText">QRマトリックス専用リーダー</div>
+    <div class="phasebar">
+      <div id="stage1Pill" class="phase">Stage1 DM</div>
+      <div id="prePill" class="phase">即時QR</div>
+      <div id="stage3Pill" class="phase">Stage3 QR</div>
+    </div>
+    <div class="btnrow">
+      <button id="startBtn">スキャン開始</button>
+      <button id="stopBtn" class="secondary" disabled>停止</button>
+    </div>
+  </div>
+
+  <div id="passwordScreen" class="overlay">
+    <div class="box">
+      <h2>パスワード入力</h2>
+      <div class="card">
+        <label>DM部データ</label>
+        <div id="passwordPreview" class="text">-</div>
+      </div>
+      <p>QR部のRS訂正済み暗号候補を検出しました。パスワード入力後、同じStage3 profileでQR部を復号します。</p>
+      <input id="passwordInput" type="password" placeholder="Password">
+      <button id="passwordOkBtn">復号する</button>
+      <button id="passwordCancelBtn" class="secondary">キャンセル</button>
+    </div>
+  </div>
+
+  <div id="resultScreen" class="overlay">
+    <div class="box">
+      <h2 id="resultTitle">読取結果</h2>
+      <div class="card">
+        <label>DM部</label>
+        <div id="resultDm" class="text">-</div>
+        <div id="resultDmMeta" class="meta"></div>
+      </div>
+      <div class="card">
+        <label>QR部</label>
+        <div id="resultQr" class="text">-</div>
+        <div id="resultQrMeta" class="meta"></div>
+      </div>
+      <div id="signatureCard" class="card" style="display:none;">
+        <label>電子署名</label>
+        <div id="signatureText" class="text">-</div>
+      </div>
+      <div class="card">
+        <label>読取工程</label>
+        <div id="resultTrace" class="text">-</div>
+      </div>
+      <button id="scanAgainBtn">もう一度スキャン</button>
+    </div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const video = $("camera");
+    const overlay = $("overlayCanvas");
+    const octx = overlay.getContext("2d");
+    const work = $("workCanvas");
+    const wctx = work.getContext("2d", { willReadFrequently: true });
+
+    let stream = null;
+    let barcodeDetector = null;
+    let isScanning = false;
+    let isProcessing = false;
+    let firstDM = null;
+    let secondQR = null;
+    let matrixProfile = null;
+    let matrixCarrier = null;
+    let savedEncryptedQr = null;
+    let appMask = null;
+    let trace = [];
+    let frameNo = 0;
+
+    const MAX_DIM_FAST = 960;
+    const MAX_DIM_ALT = 720;
+
+    function setStatus(text) { $("statusText").textContent = text; }
+    function setStage(active) {
+      $("stage1Pill").classList.toggle("active", active === "stage1");
+      $("prePill").classList.toggle("active", active === "pre");
+      $("stage3Pill").classList.toggle("active", active === "stage3");
+    }
+    function addTrace(line) {
+      trace.push(`${String(trace.length + 1).padStart(2, "0")} ${line}`);
+      if (trace.length > 80) trace.shift();
+    }
+
+    function getManagementCode32FromParts(managementCode, managementFlags16 = null) {
+      if (managementCode === undefined || managementCode === null) return null;
+      if ((managementCode >>> 0) > 0xFFFF) return managementCode >>> 0;
+      if (managementFlags16 === undefined || managementFlags16 === null) return null;
+      return ((((managementCode & 0xFFFF) << 16) | (managementFlags16 & 0xFFFF)) >>> 0);
+    }
+
+    function parseStandardMgmt(managementCode, managementFlags16 = null) {
+      const managementCode32 = getManagementCode32FromParts(managementCode, managementFlags16);
+      if (managementCode32 === null) return null;
+      const high = (managementCode32 >>> 16) & 0xFFFF;
+      const low = managementCode32 & 0xFFFF;
+      return {
+        qrNo: (high >>> 14) & 0x3,
+        colorCountBits: (high >>> 12) & 0x3,
+        dataCompBits: (high >>> 2) & 0x3,
+        regionIndexBits: high & 0x3,
+        sameDataFlag: ((low >>> 15) & 1) === 1,
+        encryptionBits: (low >>> 13) & 0x3,
+        sysEncFlag: ((low >>> 14) & 1) === 1,
+        appEncFlag: ((low >>> 13) & 1) === 1,
+        dataTypeBits: (low >>> 10) & 0x7,
+        hasDateTime: (low & 0x0200) !== 0,
+        hasExpiry: (low & 0x0100) !== 0,
+        hasReaderId: (low & 0x0080) !== 0,
+        hasLocation: (low & 0x0020) !== 0,
+        hasMunicipality: (low & 0x0010) !== 0,
+        readLimitBits: (low >>> 2) & 0x3
+      };
+    }
+
+    function itemFromDM(dm) {
+      return {
+        text: dm.text || dm.data || "",
+        data: dm.text || dm.data || "",
+        managementCode: dm.managementCode,
+        managementCode32: dm.managementCode32,
+        managementFlags16: dm.managementFlags16,
+        managementExt32: dm.managementExt32,
+        creationDateTimeExt32: dm.creationDateTimeExt32,
+        expiryExt32: dm.expiryExt32,
+        readerIdExt32: dm.readerIdExt32,
+        locationLatExt24: dm.locationLatExt24,
+        locationLonExt24: dm.locationLonExt24,
+        municipalityExt24: dm.municipalityExt24,
+        qrTwinUniqueId8: dm.qrTwinUniqueId8,
+        codewords: dm.codewords,
+        dataBytes: dm.dataBytes,
+        symbolSize: dm.symbolSize,
+        finderScore: dm.finderScore
+      };
+    }
+
+    function qrPoints(qr, map = p => p) {
+      const l = qr && qr.location;
+      if (!l) return null;
+      return [
+        map(l.topLeftCorner),
+        map(l.topRightCorner),
+        map(l.bottomRightCorner),
+        map(l.bottomLeftCorner)
+      ];
+    }
+
+    function itemFromQR(qr, map = p => p) {
+      return {
+        text: qr.data || qr.text || "",
+        data: qr.data || qr.text || "",
+        managementCode: qr.managementCode,
+        managementCode32: qr.managementCode32,
+        managementFlags16: qr.managementFlags16,
+        managementExt32: qr.managementExt32,
+        creationDateTimeExt32: qr.creationDateTimeExt32,
+        expiryExt32: qr.expiryExt32,
+        readerIdExt32: qr.readerIdExt32,
+        locationLatExt24: qr.locationLatExt24,
+        locationLonExt24: qr.locationLonExt24,
+        municipalityExt24: qr.municipalityExt24,
+        codewords: qr.codewords,
+        dataBytes: qr.dataBytes,
+        version: qr.version,
+        dimension: qr.dimension,
+        location: qr.location,
+        points: qrPoints(qr, map)
+      };
+    }
+
+    function buildMatrixProfile(mgmt) {
+      if (mgmt && mgmt.appEncFlag) {
+        if (appMask) {
+          return {
+            kind: "appenc",
+            label: "ユーザ暗号化",
+            optsList: [{ sysEncDecode: true, appEncMask: Array.from(appMask), multi: true }]
+          };
+        }
+        return {
+          kind: "appenc-raw",
+          label: "ユーザ暗号化 raw",
+          optsList: [{ sysEncDecode: true, extractRawForFailed: true, multi: true }],
+          acceptRaw: true
+        };
+      }
+      if (mgmt && mgmt.sysEncFlag && mgmt.dataTypeBits === 2) {
+        return { kind: "digitalsign", label: "電子署名", optsList: [{ sysEncDecode: true, multi: true }] };
+      }
+      if (mgmt && mgmt.sysEncFlag) {
+        return { kind: "sysenc", label: "システム暗号化", optsList: [{ sysEncDecode: true, multi: true }] };
+      }
+      return { kind: "normal", label: "ノーマル", optsList: [{ multi: true }] };
+    }
+
+    function drawQuad(points, color) {
+      if (!points || points.length !== 4) return;
+      octx.strokeStyle = color;
+      octx.lineWidth = 4;
+      octx.beginPath();
+      octx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < 4; i++) octx.lineTo(points[i].x, points[i].y);
+      octx.closePath();
+      octx.stroke();
+    }
+
+    function drawOverlay() {
+      if (!video.videoWidth) return;
+      overlay.width = video.videoWidth;
+      overlay.height = video.videoHeight;
+      octx.clearRect(0, 0, overlay.width, overlay.height);
+      drawQuad(matrixCarrier && matrixCarrier.points, "#00bcd4");
+      drawQuad(secondQR && secondQR.points, "#00e676");
+    }
+
+    function cropVideo(rect) {
+      const sx = Math.max(0, Math.floor(rect.sx));
+      const sy = Math.max(0, Math.floor(rect.sy));
+      const sw = Math.min(video.videoWidth - sx, Math.ceil(rect.sw));
+      const sh = Math.min(video.videoHeight - sy, Math.ceil(rect.sh));
+      if (sw <= 24 || sh <= 24) return null;
+      work.width = sw;
+      work.height = sh;
+      wctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+      return { imageData: wctx.getImageData(0, 0, sw, sh), width: sw, height: sh, map: p => ({ x: p.x + sx, y: p.y + sy }), rect: { sx, sy, sw, sh } };
+    }
+
+    function frameAt(maxDim) {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const scale = Math.min(1, maxDim / Math.max(vw, vh));
+      const w = Math.max(1, Math.round(vw * scale));
+      const h = Math.max(1, Math.round(vh * scale));
+      work.width = w;
+      work.height = h;
+      wctx.drawImage(video, 0, 0, vw, vh, 0, 0, w, h);
+      const inv = 1 / scale;
+      return { imageData: wctx.getImageData(0, 0, w, h), width: w, height: h, map: p => ({ x: p.x * inv, y: p.y * inv }), rect: { sx: 0, sy: 0, sw: vw, sh: vh } };
+    }
+
+    function candidateArea(qr) {
+      const pts = qrPoints(qr);
+      if (!pts) return 0;
+      let area = 0;
+      for (let i = 0; i < 4; i++) {
+        const a = pts[i], b = pts[(i + 1) % 4];
+        area += a.x * b.y - b.x * a.y;
+      }
+      return Math.abs(area / 2);
+    }
+
+    function collectQRCandidates(src, profile) {
+      const passes = [{ multi: true, extractRawForFailed: true, singleLocate: false }];
+      if (profile && profile.optsList) {
+        for (const opt of profile.optsList) passes.push({ ...opt, extractRawForFailed: true, singleLocate: false });
+      } else {
+        passes.push({ multi: true, extractRawForFailed: true, sysEncDecode: true, singleLocate: false });
+      }
+      const found = new Map();
+      for (const opt of passes) {
+        let res = null;
+        try { res = jsQR(src.imageData.data, src.width, src.height, opt); } catch (e) { res = null; }
+        const list = Array.isArray(res) ? res : (res ? [res] : []);
+        for (const qr of list) {
+          if (!qr || !qr.location) continue;
+          const pts = qrPoints(qr);
+          const cx = Math.round(pts.reduce((a, p) => a + p.x, 0) / 4 / 12);
+          const cy = Math.round(pts.reduce((a, p) => a + p.y, 0) / 4 / 12);
+          const key = `${cx}:${cy}:${qr.dimension || 0}`;
+          const old = found.get(key);
+          if (!old || (!qr.isRaw && old.isRaw) || candidateArea(qr) > candidateArea(old)) found.set(key, qr);
+        }
+      }
+      return Array.from(found.values()).sort((a, b) => candidateArea(b) - candidateArea(a)).slice(0, 8);
+    }
+
+    function decodeDMFromCarrier(src, qr, phase) {
+      if (!jsQR.decodeQRMatrix) return null;
+      let dm = null;
+      try {
+        dm = jsQR.decodeQRMatrix(src.imageData.data, src.width, src.height, qr, {
+          minFinderScore: 0.62,
+          requireManagementCode: true,
+          requireNonEmptyText: true,
+          expectedQrNo: 0
+        });
+      } catch (e) { dm = null; }
+      if (!dm || dm.isRaw) return null;
+      const mgmt = parseStandardMgmt(dm.managementCode32 ?? dm.managementCode, dm.managementFlags16);
+      if (!mgmt || mgmt.qrNo !== 0) return null;
+      const carrierPoints = qrPoints(qr, src.map);
+      matrixCarrier = {
+        qr,
+        points: carrierPoints,
+        rect: rectFromPoints(carrierPoints),
+        phase
+      };
+      addTrace(`${phase}: DM確定 score=${(dm.finderScore || 0).toFixed(2)}`);
+      return itemFromDM(dm);
+    }
+
+    function rectFromPoints(points, padRatio = 0.22) {
+      if (!points || points.length < 4) return null;
+      const xs = points.map(p => p.x);
+      const ys = points.map(p => p.y);
+      const x0 = Math.min(...xs), y0 = Math.min(...ys);
+      const x1 = Math.max(...xs), y1 = Math.max(...ys);
+      const pad = Math.max(24, Math.max(x1 - x0, y1 - y0) * padRatio);
+      return {
+        sx: Math.max(0, x0 - pad),
+        sy: Math.max(0, y0 - pad),
+        sw: Math.min(video.videoWidth, x1 - x0 + pad * 2),
+        sh: Math.min(video.videoHeight, y1 - y0 + pad * 2)
+      };
+    }
+
+    function acceptQR(qr, src, profile, phase) {
+      if (!qr || !qr.location) return null;
+      if (profile && profile.acceptRaw && qr.isRaw) {
+        savedEncryptedQr = { raw: qr, phase };
+        addTrace(`${phase}: QR部 raw候補保存`);
+        return { rawOnly: true };
+      }
+      if (!qr.data || qr.isRaw) return null;
+      const mgmt = parseStandardMgmt(qr.managementCode32 ?? qr.managementCode, qr.managementFlags16);
+      if (!mgmt || mgmt.qrNo !== 1) return null;
+      addTrace(`${phase}: QR部確定 (${profile.label})`);
+      return itemFromQR(qr, src.map);
+    }
+
+    function tryDecodeQRPart(src, profile, phase) {
+      const optsList = profile && profile.optsList ? profile.optsList : [{ multi: true }];
+      for (const base of optsList) {
+        const opt = { multi: true, extractRawForFailed: true, ...base };
+        let res = null;
+        try { res = jsQR(src.imageData.data, src.width, src.height, opt); } catch (e) { res = null; }
+        const list = Array.isArray(res) ? res : (res ? [res] : []);
+        for (const qr of list) {
+          const hit = acceptQR(qr, src, profile, phase);
+          if (hit) return hit;
+        }
+      }
+      return null;
+    }
+
+    async function runMatrixLadder(target, profile, opts = {}) {
+      if (!video.videoWidth) return null;
+
+      if (target === "M2_QR" && matrixCarrier && matrixCarrier.rect) {
+        const crop = cropVideo(matrixCarrier.rect);
+        if (crop) {
+          const phase = opts.immediate ? "F0.5 carrier同フレームcrop" : "F0 carrier幾何crop";
+          const hit = tryDecodeQRPart(crop, profile, phase);
+          if (hit) return hit;
+        }
+      }
+
+      if (barcodeDetector) {
+        try {
+          const boxes = await barcodeDetector.detect(video);
+          const sorted = Array.from(boxes || []).filter(b => b.boundingBox).sort((a, b) => {
+            return (b.boundingBox.width * b.boundingBox.height) - (a.boundingBox.width * a.boundingBox.height);
+          }).slice(0, 3);
+          for (const b of sorted) {
+            const bb = b.boundingBox;
+            const pad = Math.max(70, Math.max(bb.width, bb.height) * 0.55);
+            const crop = cropVideo({ sx: bb.x - pad, sy: bb.y - pad, sw: bb.width + pad * 2, sh: bb.height + pad * 2 });
+            if (!crop) continue;
+            if (target === "M1_DM") {
+              for (const qr of collectQRCandidates(crop, null)) {
+                const dm = decodeDMFromCarrier(crop, qr, "F1 BD carrier crop");
+                if (dm) return dm;
+              }
+            } else {
+              const hit = tryDecodeQRPart(crop, profile, "F1 BD carrier crop");
+              if (hit) return hit;
+            }
+          }
+        } catch (e) {}
+      }
+
+      const scales = opts.stage3 ? [MAX_DIM_FAST, MAX_DIM_ALT, Math.max(video.videoWidth, video.videoHeight)] : [MAX_DIM_FAST, MAX_DIM_ALT];
+      for (const maxDim of scales) {
+        const src = frameAt(maxDim);
+        const phase = maxDim === MAX_DIM_FAST ? "F2 960 full" : (maxDim === MAX_DIM_ALT ? "F3 720 full" : "F4 full");
+        if (target === "M1_DM") {
+          for (const qr of collectQRCandidates(src, null)) {
+            const dm = decodeDMFromCarrier(src, qr, phase);
+            if (dm) return dm;
+          }
+        } else {
+          const hit = tryDecodeQRPart(src, profile, phase);
+          if (hit) return hit;
+        }
+      }
+      return null;
+    }
+
+    async function handleFrame() {
+      if (!isScanning || isProcessing) return;
+      isProcessing = true;
+      frameNo++;
+      drawOverlay();
+      try {
+        if (!firstDM) {
+          setStage("stage1");
+          setStatus("Stage1: DM部を探索中...");
+          const dm = await runMatrixLadder("M1_DM", { label: "DM plain" });
+          if (dm) {
+            firstDM = dm;
+            const mgmt = parseStandardMgmt(dm.managementCode32 ?? dm.managementCode, dm.managementFlags16);
+            matrixProfile = buildMatrixProfile(mgmt);
+            if (mgmt && mgmt.sameDataFlag) {
+              secondQR = { text: firstDM.text, data: firstDM.text, points: matrixCarrier && matrixCarrier.points };
+              showResult();
+              return;
+            }
+            setStage("pre");
+            setStatus(`即時プリロケート: QR部 ${matrixProfile.label}`);
+            const pre = await runMatrixLadder("M2_QR", matrixProfile, { immediate: true });
+            if (await dispatchM2(pre)) return;
+          }
+        } else {
+          setStage("stage3");
+          setStatus(`Stage3: QR部 ${matrixProfile.label} 探索中...`);
+          const hit = await runMatrixLadder("M2_QR", matrixProfile, { stage3: true });
+          if (await dispatchM2(hit)) return;
+        }
+      } finally {
+        isProcessing = false;
+      }
+      if (isScanning) requestAnimationFrame(handleFrame);
+    }
+
+    async function dispatchM2(hit) {
+      if (!hit) return false;
+      if (hit.rawOnly) {
+        isScanning = false;
+        isProcessing = false;
+        showPassword();
+        return true;
+      }
+      secondQR = hit;
+      if (matrixProfile && matrixProfile.kind === "digitalsign") {
+        const verify = await verifyMatrixSignature(secondQR.text);
+        showResult(verify);
+      } else {
+        showResult();
+      }
+      return true;
+    }
+
+    async function sha256Bytes(input) {
+      const buf = await crypto.subtle.digest("SHA-256", input);
+      return new Uint8Array(buf);
+    }
+
+    async function deriveMaskFromPassword(password, neededBytes, creationDateTimeExt32) {
+      const pwBytes = new TextEncoder().encode(password);
+      let input = pwBytes;
+      if (creationDateTimeExt32 !== undefined && creationDateTimeExt32 !== null) {
+        const dt = new Uint8Array(4);
+        dt[0] = (creationDateTimeExt32 >>> 24) & 255;
+        dt[1] = (creationDateTimeExt32 >>> 16) & 255;
+        dt[2] = (creationDateTimeExt32 >>> 8) & 255;
+        dt[3] = creationDateTimeExt32 & 255;
+        input = new Uint8Array(pwBytes.length + 4);
+        input.set(pwBytes);
+        input.set(dt, pwBytes.length);
+      }
+      let h = await sha256Bytes(input);
+      const out = new Uint8Array(neededBytes);
+      let off = 0;
+      while (off < neededBytes) {
+        const n = Math.min(h.length, neededBytes - off);
+        out.set(h.subarray(0, n), off);
+        off += n;
+        if (off < neededBytes) h = await sha256Bytes(h);
+      }
+      return out;
+    }
+
+    const SECP160R1 = {
+      p: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7FFFFFFFn,
+      a: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7FFFFFFFn - 3n,
+      b: 0x1C97BEFC54BD7A8B65ACF89F81D4D4ADC565FA45n,
+      Gx: 0x4A96B5688EF573284664698968C38BB913CBFC82n,
+      Gy: 0x23A628553168947D59DCC912042351377AC5FB32n,
+      n: 0x0100000000000000000001F4C8F927AED3CA752257n
+    };
+    const ECDSA_PUBLIC_KEYS = {
+      1: "046a4e7d6aca3f3903eb33c7d890eb06ab40943e314ac73a562414b347c1a286b791b057feeccb3038",
+      2: "043a9d0e35df4c6602971073a703c45ae87ba8074e1d49f24fc36f0fc27aa9f6009b6afe39f0b5cc9b",
+      3: "0491516f25a3044bc2d6fbbb28437b5645f3fdfd24916e2b658a1b7a54acaf7c1fccd7f9cb364a4a51",
+      4: "0406a98cb2e453c5e60993ef83c70b7526340765108302dc2d8e97c8e10140021b19c81edd6e6f782c",
+      5: "0470bf87f7189b4d06ea5fd556431622a081cc7338921d086fbb77d7313492dd5795957f85424456e2",
+      6: "0422d3020fd4bdb0935fab8a28a2b9c90a36c05768a7e7d60d17f0783ac2d92992cc311141cc9d07bd",
+      7: "044f15effd43786d7d3751afd7799084a67dcd0e1adb0c19c8e5eef2fd1b85bf911a4edb2f385ffaa9",
+      8: "0462c63a8e85ede6fc8a927bbe94ec16fdfa46e22dc1d3b5ccf74d507b38be8c71a84f038f8e0a66b4",
+      9: "046563d6db3eae744da941ff7084b376fb2852f00197de9d1dee81e66c2ad659187cd1a36ef5719901",
+      10: "04fe13aaeb907d22d0f2dbb9d873fca32835f651974ea86d7f36117c8c0506324f9b0c975e41528096"
+    };
+    const ECDSA_SENDER_NAMES = { 1: "TRI", 2: "Taketomo", 3: "SECOM", 4: "Nagoya Bar", 5: "Aichi Bar", 6: "Nikkei", 7: "Saitama", 8: "Tokai", 9: "TRI Education", 10: "Waseda" };
+
+    function bigMod(a, m) { return ((a % m) + m) % m; }
+    function modInverse(a, m) {
+      a = bigMod(a, m);
+      let oldR = a, r = m, oldS = 1n, s = 0n;
+      while (r !== 0n) {
+        const q = oldR / r;
+        [oldR, r] = [r, oldR - q * r];
+        [oldS, s] = [s, oldS - q * s];
+      }
+      return bigMod(oldS, m);
+    }
+    function pointAdd(P, Q) {
+      if (!P) return Q;
+      if (!Q) return P;
+      const { p, a } = SECP160R1;
+      if (P.x === Q.x && P.y !== Q.y) return null;
+      const m = P.x === Q.x && P.y === Q.y
+        ? bigMod((3n * P.x * P.x + a) * modInverse(2n * P.y, p), p)
+        : bigMod((Q.y - P.y) * modInverse(Q.x - P.x, p), p);
+      const x = bigMod(m * m - P.x - Q.x, p);
+      const y = bigMod(m * (P.x - x) - P.y, p);
+      return { x, y };
+    }
+    function pointMultiply(k, P) {
+      let R = null, Q = { x: P.x, y: P.y };
+      while (k > 0n) {
+        if (k & 1n) R = pointAdd(R, Q);
+        Q = pointAdd(Q, Q);
+        k >>= 1n;
+      }
+      return R;
+    }
+    function bytesToBigInt(bytes) {
+      let v = 0n;
+      for (const b of bytes) v = (v << 8n) + BigInt(b);
+      return v;
+    }
+    async function ecdsaVerify(hashInputBytes, sigR, sigS, pubKeyHex) {
+      const hashValue = await sha256Bytes(hashInputBytes);
+      const z = bytesToBigInt(hashValue) >> BigInt(Math.max(0, hashValue.length * 8 - 160));
+      const r = bytesToBigInt(sigR);
+      const s = bytesToBigInt(sigS);
+      const { n, Gx, Gy } = SECP160R1;
+      if (r <= 0n || r >= n || s <= 0n || s >= n) return false;
+      const w = modInverse(s, n);
+      const u1 = bigMod(z * w, n);
+      const u2 = bigMod(r * w, n);
+      const G = { x: Gx, y: Gy };
+      const Q = { x: BigInt("0x" + pubKeyHex.substring(2, 42)), y: BigInt("0x" + pubKeyHex.substring(42, 82)) };
+      const R = pointAdd(pointMultiply(u1, G), pointMultiply(u2, Q));
+      return !!R && bigMod(R.x, n) === r;
+    }
+
+    async function verifyMatrixSignature(signatureText) {
+      try {
+        const binary = atob(signatureText || "");
+        if (binary.length !== 42) throw new Error("invalid length");
+        const sign = new Uint8Array(42);
+        for (let i = 0; i < 42; i++) sign[i] = binary.charCodeAt(i);
+        const keyId = (sign[0] << 8) | sign[1];
+        const pub = ECDSA_PUBLIC_KEYS[keyId];
+        const payload = new Uint8Array((firstDM && firstDM.codewords) || []);
+        const verified = !!(pub && await ecdsaVerify(payload, sign.slice(2, 22), sign.slice(22, 42), pub));
+        return { verified, keyId, senderName: ECDSA_SENDER_NAMES[keyId] || `ID:${keyId}` };
+      } catch (e) {
+        return { verified: false, keyId: 0, senderName: "Invalid signature" };
+      }
+    }
+
+    function showPassword() {
+      $("passwordPreview").textContent = firstDM ? firstDM.text : "-";
+      $("passwordInput").value = "";
+      $("passwordScreen").style.display = "flex";
+      setStatus("パスワード入力待ち");
+    }
+
+    function showResult(signature = null) {
+      isScanning = false;
+      isProcessing = false;
+      setStage(null);
+      drawOverlay();
+      const mgmt = firstDM ? parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16) : null;
+      $("resultTitle").textContent = signature ? "QR Matrix 電子署名結果" : "QR Matrix 読取結果";
+      $("resultDm").textContent = firstDM ? firstDM.text : "-";
+      $("resultQr").textContent = secondQR ? secondQR.text : "-";
+      $("resultDmMeta").textContent = mgmt ? `種別=${matrixProfile ? matrixProfile.label : "-"} / readLimit=${mgmt.readLimitBits}` : "";
+      $("resultQrMeta").textContent = secondQR && secondQR.version ? `version=${secondQR.version.versionNumber || secondQR.version}` : "";
+      $("resultTrace").textContent = trace.join("\n") || "-";
+      if (signature) {
+        $("signatureCard").style.display = "";
+        $("signatureText").innerHTML = signature.verified
+          ? `<span class="ok">認証できました</span>\n署名者: ${signature.senderName}`
+          : `<span class="bad">認証できませんでした</span>\n署名者: ${signature.senderName}`;
+      } else {
+        $("signatureCard").style.display = "none";
+      }
+      $("resultScreen").style.display = "flex";
+      $("startBtn").disabled = false;
+      $("stopBtn").disabled = true;
+    }
+
+    async function startCamera() {
+      if (stream) return;
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      if ("BarcodeDetector" in window) {
+        try { barcodeDetector = new BarcodeDetector({ formats: ["qr_code"] }); } catch (e) { barcodeDetector = null; }
+      }
+    }
+
+    function resetScanState() {
+      firstDM = null;
+      secondQR = null;
+      matrixProfile = null;
+      matrixCarrier = null;
+      savedEncryptedQr = null;
+      appMask = null;
+      trace = [];
+      frameNo = 0;
+      octx.clearRect(0, 0, overlay.width, overlay.height);
+    }
+
+    async function startScan() {
+      if (!window.jsQR || !jsQR.decodeQRMatrix) {
+        alert("jsQR.js のQR Matrix拡張が読み込まれていません。");
+        return;
+      }
+      await startCamera();
+      resetScanState();
+      $("resultScreen").style.display = "none";
+      $("passwordScreen").style.display = "none";
+      $("startBtn").disabled = true;
+      $("stopBtn").disabled = false;
+      isScanning = true;
+      isProcessing = false;
+      setStatus("Stage1: DM部を探索中...");
+      requestAnimationFrame(handleFrame);
+    }
+
+    function stopScan() {
+      isScanning = false;
+      isProcessing = false;
+      setStage(null);
+      setStatus("停止しました");
+      $("startBtn").disabled = false;
+      $("stopBtn").disabled = true;
+    }
+
+    $("startBtn").addEventListener("click", startScan);
+    $("stopBtn").addEventListener("click", stopScan);
+    $("scanAgainBtn").addEventListener("click", () => { $("resultScreen").style.display = "none"; startScan(); });
+    $("passwordCancelBtn").addEventListener("click", () => { $("passwordScreen").style.display = "none"; stopScan(); });
+    $("passwordOkBtn").addEventListener("click", async () => {
+      const pw = $("passwordInput").value;
+      if (!pw) { alert("パスワードを入力してください。"); return; }
+      $("passwordScreen").style.display = "none";
+      setStatus("パスワードマスク生成中...");
+      appMask = await deriveMaskFromPassword(pw, 5000, firstDM && firstDM.creationDateTimeExt32);
+      matrixProfile = buildMatrixProfile(parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16));
+      isScanning = true;
+      isProcessing = false;
+      requestAnimationFrame(handleFrame);
+    });
+  </script>
+</body>
+</html>
