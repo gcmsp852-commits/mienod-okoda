@@ -60,6 +60,55 @@
     video { z-index: 1; }
     #overlayCanvas { z-index: 2; pointer-events: none; }
     #workCanvas { display: none; }
+    #cameraControls {
+      position: absolute;
+      left: 0;
+      bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+      width: 100%;
+      z-index: 5;
+      display: none;
+      justify-content: center;
+      gap: 12px;
+      padding: 0 14px;
+      pointer-events: none;
+    }
+    #zoomControls {
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      z-index: 6;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      border-radius: 8px;
+      background: rgba(10,16,18,.72);
+      border: 1px solid rgba(255,255,255,.14);
+      box-shadow: 0 6px 18px rgba(0,0,0,.35);
+    }
+    #zoomControls button {
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      border-radius: 8px;
+      font-size: 1.2rem;
+    }
+    #zoomLabel {
+      min-width: 44px;
+      text-align: center;
+      color: var(--ink);
+      font-size: .85rem;
+      font-weight: 700;
+    }
+    #cameraControls button {
+      pointer-events: auto;
+      min-width: 132px;
+      box-shadow: 0 6px 18px rgba(0,0,0,.42);
+    }
+    body.scanning .bottom { display: none; }
+    body.scanning .camera { flex: 1 1 auto; }
+    body.scanning #cameraControls,
+    body.scanning #zoomControls { display: flex; }
     .bottom {
       padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px));
       background: var(--panel);
@@ -165,6 +214,15 @@
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
     <canvas id="workCanvas"></canvas>
+    <div id="zoomControls" aria-label="Zoom controls">
+      <button id="zoomOutBtn" class="secondary" type="button">−</button>
+      <div id="zoomLabel">1.0x</div>
+      <button id="zoomInBtn" type="button">＋</button>
+    </div>
+    <div id="cameraControls">
+      <button id="modeSwitchBtn" class="secondary" type="button">モード切替</button>
+      <button id="cameraScanAgainBtn" type="button">もう一度スキャン</button>
+    </div>
   </div>
   <div class="bottom">
     <div class="status" id="statusText">QRマトリックス専用リーダー</div>
@@ -252,6 +310,7 @@
     let timeoutTimer = null;
     let debugSavedForCurrentScan = false;
     let debugStats = null;
+    let zoomState = null;
 
     function newDebugStats() {
       return {
@@ -494,6 +553,7 @@
       $("signatureCard").style.display = "none";
       $("resultTrace").textContent = report;
       $("resultScreen").style.display = "flex";
+      setScanUiActive(false);
       $("startBtn").disabled = false;
       $("stopBtn").disabled = true;
     }
@@ -519,6 +579,7 @@
       $("signatureCard").style.display = "none";
       $("resultTrace").textContent = report;
       $("resultScreen").style.display = "flex";
+      setScanUiActive(false);
       $("startBtn").disabled = false;
       $("stopBtn").disabled = true;
     }
@@ -528,6 +589,13 @@
       $("stage1Pill").classList.toggle("active", active === "stage1");
       $("prePill").classList.toggle("active", active === "pre");
       $("stage3Pill").classList.toggle("active", active === "stage3");
+    }
+    function setScanUiActive(active) {
+      document.body.classList.toggle("scanning", !!active);
+      const controls = $("cameraControls");
+      const zoomControls = $("zoomControls");
+      if (controls) controls.style.display = active ? "flex" : "none";
+      if (zoomControls) zoomControls.style.display = active ? "flex" : "none";
     }
     function addTrace(line) {
       trace.push(`${String(trace.length + 1).padStart(2, "0")} ${line}`);
@@ -1178,6 +1246,7 @@
     function showPassword() {
       clearScanTimeout();
       recordEvent("password screen opened");
+      setScanUiActive(false);
       $("passwordPreview").textContent = firstDM ? firstDM.text : "-";
       $("passwordInput").value = "";
       $("passwordScreen").style.display = "flex";
@@ -1210,6 +1279,7 @@
         $("signatureCard").style.display = "none";
       }
       $("resultScreen").style.display = "flex";
+      setScanUiActive(false);
       $("startBtn").disabled = false;
       $("stopBtn").disabled = true;
     }
@@ -1222,9 +1292,76 @@
       });
       video.srcObject = stream;
       await video.play();
+      await setupCameraZoom();
       if ("BarcodeDetector" in window) {
         try { barcodeDetector = new BarcodeDetector({ formats: ["qr_code"] }); } catch (e) { barcodeDetector = null; }
       }
+    }
+
+    function getVideoTrack() {
+      return stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    }
+
+    function updateZoomUi() {
+      const label = $("zoomLabel");
+      const outBtn = $("zoomOutBtn");
+      const inBtn = $("zoomInBtn");
+      if (!zoomState || !zoomState.supported) {
+        if (label) label.textContent = "no zoom";
+        if (outBtn) outBtn.disabled = true;
+        if (inBtn) inBtn.disabled = true;
+        return;
+      }
+      if (label) label.textContent = `${zoomState.value.toFixed(1)}x`;
+      if (outBtn) outBtn.disabled = zoomState.value <= zoomState.min + 0.001;
+      if (inBtn) inBtn.disabled = zoomState.value >= zoomState.max - 0.001;
+    }
+
+    async function applyZoom(value) {
+      const track = getVideoTrack();
+      if (!track || !track.applyConstraints || !zoomState || !zoomState.supported) return false;
+      const next = Math.min(zoomState.max, Math.max(zoomState.min, value));
+      try {
+        await track.applyConstraints({ advanced: [{ zoom: next }] });
+        zoomState.value = next;
+        updateZoomUi();
+        recordEvent(`zoom=${next.toFixed(2)}`);
+        return true;
+      } catch (e) {
+        recordEvent(`zoom apply failed: ${e && e.name ? e.name : "error"}`);
+        return false;
+      }
+    }
+
+    async function setupCameraZoom() {
+      const track = getVideoTrack();
+      zoomState = { supported: false, min: 1, max: 1, step: 0.1, value: 1 };
+      if (!track || !track.getCapabilities || !track.applyConstraints) {
+        updateZoomUi();
+        return;
+      }
+      let caps = {};
+      try { caps = track.getCapabilities() || {}; } catch (e) { caps = {}; }
+      if (!caps.zoom) {
+        updateZoomUi();
+        return;
+      }
+      const settings = track.getSettings ? track.getSettings() : {};
+      const min = Number.isFinite(caps.zoom.min) ? caps.zoom.min : 1;
+      const max = Number.isFinite(caps.zoom.max) ? caps.zoom.max : min;
+      const step = Number.isFinite(caps.zoom.step) && caps.zoom.step > 0 ? caps.zoom.step : Math.max(0.1, (max - min) / 20);
+      const current = Number.isFinite(settings.zoom) ? settings.zoom : min;
+      zoomState = { supported: max > min, min, max, step, value: current };
+      if (zoomState.supported) {
+        await applyZoom(Math.min(max, Math.max(min, min * 1.7)));
+      } else {
+        updateZoomUi();
+      }
+    }
+
+    function changeZoom(direction) {
+      if (!zoomState || !zoomState.supported) return;
+      applyZoom(zoomState.value + zoomState.step * direction);
     }
 
     function resetScanState() {
@@ -1278,6 +1415,18 @@
     $("stopBtn").addEventListener("click", stopScan);
     $("copyLogsBtn").addEventListener("click", copyAllDebugLog);
     $("clearLogsBtn").addEventListener("click", clearDebugLog);
+    $("modeSwitchBtn").addEventListener("click", () => {
+      $("resultScreen").style.display = "none";
+      $("passwordScreen").style.display = "none";
+      stopScan();
+    });
+    $("cameraScanAgainBtn").addEventListener("click", () => {
+      $("resultScreen").style.display = "none";
+      $("passwordScreen").style.display = "none";
+      startScan();
+    });
+    $("zoomOutBtn").addEventListener("click", () => changeZoom(-1));
+    $("zoomInBtn").addEventListener("click", () => changeZoom(1));
     $("scanAgainBtn").addEventListener("click", () => { $("resultScreen").style.display = "none"; startScan(); });
     $("passwordCancelBtn").addEventListener("click", () => { $("passwordScreen").style.display = "none"; stopScan(); });
     $("passwordOkBtn").addEventListener("click", async () => {
@@ -1289,6 +1438,7 @@
       matrixProfile = buildMatrixProfile(parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16));
       isScanning = true;
       isProcessing = false;
+      setScanUiActive(true);
       recordEvent("password mask generated; resume scan");
       startScanTimeout();
       requestAnimationFrame(handleFrame);
@@ -1307,6 +1457,7 @@
       $("stopBtn").disabled = false;
       isScanning = true;
       isProcessing = false;
+      setScanUiActive(true);
       setStatus("Stage1: searching DM part...");
       recordEvent("scan start");
       startScanTimeout();
@@ -1318,6 +1469,7 @@
       isProcessing = false;
       clearScanTimeout();
       setStage(null);
+      setScanUiActive(false);
       setStatus("Stopped");
       $("startBtn").disabled = false;
       $("stopBtn").disabled = true;
@@ -1327,6 +1479,18 @@
     $("stopBtn").addEventListener("click", stopScan);
     $("copyLogsBtn").addEventListener("click", copyAllDebugLog);
     $("clearLogsBtn").addEventListener("click", clearDebugLog);
+    $("modeSwitchBtn").addEventListener("click", () => {
+      $("resultScreen").style.display = "none";
+      $("passwordScreen").style.display = "none";
+      stopScan();
+    });
+    $("cameraScanAgainBtn").addEventListener("click", () => {
+      $("resultScreen").style.display = "none";
+      $("passwordScreen").style.display = "none";
+      startScan();
+    });
+    $("zoomOutBtn").addEventListener("click", () => changeZoom(-1));
+    $("zoomInBtn").addEventListener("click", () => changeZoom(1));
     $("scanAgainBtn").addEventListener("click", () => { $("resultScreen").style.display = "none"; startScan(); });
     $("passwordCancelBtn").addEventListener("click", () => { $("passwordScreen").style.display = "none"; stopScan(); });
     $("passwordOkBtn").addEventListener("click", async () => {
@@ -1340,6 +1504,7 @@
       recordEvent("fallback to appMask scan after saved raw failed");
       isScanning = true;
       isProcessing = false;
+      setScanUiActive(true);
       recordEvent("password mask generated; resume scan");
       startScanTimeout();
       requestAnimationFrame(handleFrame);
