@@ -209,7 +209,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader7</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -311,6 +311,10 @@
     let debugSavedForCurrentScan = false;
     let debugStats = null;
     let zoomState = null;
+    let bdHint = null;
+    let bdPending = false;
+    let stage1Miss = 0;
+    let stage3Miss = 0;
 
     function newDebugStats() {
       return {
@@ -780,16 +784,27 @@
       drawQuad(secondQR && secondQR.points, "#00e676");
     }
 
-    function cropVideo(rect) {
+    function cropVideo(rect, maxDim = 0) {
       const sx = Math.max(0, Math.floor(rect.sx));
       const sy = Math.max(0, Math.floor(rect.sy));
       const sw = Math.min(video.videoWidth - sx, Math.ceil(rect.sw));
       const sh = Math.min(video.videoHeight - sy, Math.ceil(rect.sh));
       if (sw <= 24 || sh <= 24) return null;
-      work.width = sw;
-      work.height = sh;
-      wctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-      return { imageData: wctx.getImageData(0, 0, sw, sh), width: sw, height: sh, map: p => ({ x: p.x + sx, y: p.y + sy }), rect: { sx, sy, sw, sh } };
+      const scale = maxDim > 0 ? Math.min(1, maxDim / Math.max(sw, sh)) : 1;
+      const tw = Math.max(1, Math.round(sw * scale));
+      const th = Math.max(1, Math.round(sh * scale));
+      work.width = tw;
+      work.height = th;
+      wctx.drawImage(video, sx, sy, sw, sh, 0, 0, tw, th);
+      const inv = 1 / scale;
+      return {
+        imageData: wctx.getImageData(0, 0, tw, th),
+        width: tw,
+        height: th,
+        scale,
+        map: p => ({ x: p.x * inv + sx, y: p.y * inv + sy }),
+        rect: { sx, sy, sw, sh }
+      };
     }
 
     function frameAt(maxDim) {
@@ -816,56 +831,52 @@
       return Math.abs(area / 2);
     }
 
-    function collectQRCandidates(src, profile) {
-      const passes = [{ multi: true, extractRawForFailed: true, singleLocate: false }];
-      if (profile && profile.optsList) {
-        for (const opt of profile.optsList) passes.push({ ...opt, extractRawForFailed: true, singleLocate: false });
-      } else {
-        passes.push({ multi: true, extractRawForFailed: true, sysEncDecode: true, singleLocate: false });
-      }
-      const found = new Map();
-      for (const opt of passes) {
-        let res = null;
-        const t0 = performance.now();
-        const probeCollector = [];
-        opt.debugProbe = true;
-        opt.probeCollector = probeCollector;
-        try { res = jsQR(src.imageData.data, src.width, src.height, opt); } catch (e) { res = null; }
-        const elapsed = performance.now() - t0;
-        const list = Array.isArray(res) ? res : (res ? [res] : []);
-        recordPhase("QR locator/probe", elapsed, list.length ? "success" : "fail",
-          `src=${src.width}x${src.height} opts=${opt.sysEncDecode ? "sysenc" : (opt.appEncMask ? "appmask" : "plain")} candidates=${list.length} probes=${probeCollector.length || 0}`);
-        for (const qr of list) {
-          if (!qr || !qr.location) continue;
-          const pts = qrPoints(qr);
-          const cx = Math.round(pts.reduce((a, p) => a + p.x, 0) / 4 / 12);
-          const cy = Math.round(pts.reduce((a, p) => a + p.y, 0) / 4 / 12);
-          const key = `${cx}:${cy}:${qr.dimension || 0}`;
-          const old = found.get(key);
-          if (!old || (!qr.isRaw && old.isRaw) || candidateArea(qr) > candidateArea(old)) found.set(key, qr);
-        }
-      }
-      return Array.from(found.values()).sort((a, b) => candidateArea(b) - candidateArea(a)).slice(0, 8);
-    }
-
-    function collectLocatorOnlyCandidates(src, phase) {
-      if (!window.jsQR || !jsQR.locateOnly) return [];
+    function collectCarrierCandidates(src, phase, deep = false) {
+      const opt = {
+        multi: true,
+        extractRawForFailed: true,
+        inversionAttempts: deep ? "attemptBoth" : "dontInvert",
+        singleLocate: !deep,
+        forceExpectedAlignmentCandidate: true
+      };
       let res = null;
       const t0 = performance.now();
-      try {
-        res = jsQR.locateOnly(src.imageData.data, src.width, src.height, {
-          inversionAttempts: "dontInvert",
-          singleLocate: true
-        });
-      } catch (e) {
-        res = null;
-      }
+      try { res = jsQR(src.imageData.data, src.width, src.height, opt); } catch (e) { res = null; }
       const elapsed = performance.now() - t0;
       const list = Array.isArray(res) ? res : (res ? [res] : []);
-      const fixedCount = list.filter(q => q && q.probeMeta && q.probeMeta.alignmentForcedExpected).length;
-      recordPhase(phase + " / QR locator-only", elapsed, list.length ? "success" : "fail",
-        `src=${src.width}x${src.height} locations=${list.length} alignFixed=${fixedCount}`);
-      return list.sort((a, b) => candidateArea(b) - candidateArea(a)).slice(0, 3);
+      recordPhase(phase + " / QR candidates", elapsed, list.length ? "success" : "fail",
+        `src=${src.width}x${src.height} mode=${deep ? "deep" : "fast"} candidates=${list.length}`);
+      const found = new Map();
+      for (const qr of list) {
+        if (!qr || !qr.location) continue;
+        const pts = qrPoints(qr);
+        const cx = Math.round(pts.reduce((a, p) => a + p.x, 0) / 4 / 8);
+        const cy = Math.round(pts.reduce((a, p) => a + p.y, 0) / 4 / 8);
+        const ap = qr.location.bottomRightAlignmentPattern || { x: 0, y: 0 };
+        const key = `${cx}:${cy}:${qr.dimension || 0}:${Math.round(ap.x)}:${Math.round(ap.y)}`;
+        const old = found.get(key);
+        if (!old || (!qr.isRaw && old.isRaw) || candidateArea(qr) > candidateArea(old)) found.set(key, qr);
+      }
+      return Array.from(found.values()).sort((a, b) => candidateArea(b) - candidateArea(a)).slice(0, 6);
+    }
+
+    function tryDMFromCandidates(src, cands, phase) {
+      for (const qr of cands.slice(0, 5)) {
+        const dm = decodeDMFromCarrier(src, qr, phase);
+        if (dm) return dm;
+      }
+      return null;
+    }
+
+    function videoAreaOfCandidate(src, qr) {
+      const pts = qrPoints(mapQrLocation(qr, src.map));
+      if (!pts) return 0;
+      let area = 0;
+      for (let i = 0; i < 4; i++) {
+        const a = pts[i], b = pts[(i + 1) % 4];
+        area += a.x * b.y - b.x * a.y;
+      }
+      return Math.abs(area / 2);
     }
 
     function decodeDMFromCarrier(src, qr, phase) {
@@ -969,20 +980,23 @@
       return itemFromQR(qr, src.map);
     }
 
-    function tryDecodeQRPart(src, profile, phase) {
+    function tryDecodeQRPart(src, profile, phase, deep = false) {
       const optsList = profile && profile.optsList ? profile.optsList : [{ multi: true }];
+      const passes = [];
       for (const base of optsList) {
-        const opt = { multi: true, extractRawForFailed: true, ...base };
+        passes.push({ multi: true, extractRawForFailed: true, forceExpectedAlignmentCandidate: true, inversionAttempts: "dontInvert", singleLocate: true, ...base });
+      }
+      if (deep) {
+        for (const base of optsList) passes.push({ multi: true, extractRawForFailed: true, forceExpectedAlignmentCandidate: true, ...base });
+      }
+      for (const opt of passes) {
         let res = null;
         const t0 = performance.now();
-        const probeCollector = [];
-        opt.debugProbe = true;
-        opt.probeCollector = probeCollector;
         try { res = jsQR(src.imageData.data, src.width, src.height, opt); } catch (e) { res = null; }
         const elapsed = performance.now() - t0;
         const list = Array.isArray(res) ? res : (res ? [res] : []);
         recordPhase(phase + " / QR decode", elapsed, list.length ? "success" : "fail",
-          `src=${src.width}x${src.height} opts=${opt.sysEncDecode ? "sysenc" : (opt.appEncMask ? "appmask" : "plain")} results=${list.length} probes=${probeCollector.length || 0}`);
+          `src=${src.width}x${src.height} opts=${opt.sysEncDecode ? "sysenc" : (opt.appEncMask ? "appmask" : "plain")}${opt.singleLocate ? " fast" : " deep"} results=${list.length}`);
         for (const qr of list) {
           const hit = acceptQR(qr, src, profile, phase);
           if (hit) return hit;
@@ -1047,77 +1061,110 @@
       return true;
     }
 
-    async function runMatrixLadder(target, profile, opts = {}) {
+    function kickBarcodeDetectorHint() {
+      if (!barcodeDetector || bdPending || !video.videoWidth) return;
+      bdPending = true;
+      const t0 = performance.now();
+      barcodeDetector.detect(video).then(boxes => {
+        bdPending = false;
+        if (!isScanning) return;
+        const elapsed = performance.now() - t0;
+        const arr = Array.from(boxes || []).filter(b => b.boundingBox);
+        recordPhase("F1 BD hint(async)", elapsed, arr.length ? "success" : "fail", `bbox=${arr.length}`);
+        if (!arr.length) return;
+        const bb = arr.sort((a, b) => (b.boundingBox.width * b.boundingBox.height) - (a.boundingBox.width * a.boundingBox.height))[0].boundingBox;
+        const pad = Math.max(70, Math.max(bb.width, bb.height) * 0.55);
+        bdHint = { rect: { sx: bb.x - pad, sy: bb.y - pad, sw: bb.width + pad * 2, sh: bb.height + pad * 2 }, at: performance.now() };
+        recordEvent(`F1 BD hint: ${Math.round(bb.x)},${Math.round(bb.y)} ${Math.round(bb.width)}x${Math.round(bb.height)}`);
+      }).catch(() => { bdPending = false; });
+    }
+
+    async function runStage1(deep) {
       if (!video.videoWidth) return null;
 
-      if (target === "M2_QR" && matrixCarrier && matrixCarrier.rect) {
-        const crop = cropVideo(matrixCarrier.rect);
+      if (bdHint && performance.now() - bdHint.at < 1200) {
+        const rect = bdHint.rect;
+        bdHint = null;
+        const crop = cropVideo(rect, 900);
+        if (crop) {
+          recordEvent(`S1 BDhint crop: ${crop.width}x${crop.height}`);
+          const cands = collectCarrierCandidates(crop, "S1 BDhint crop");
+          const dm = tryDMFromCandidates(crop, cands, "S1 BDhint crop");
+          if (dm) return { dm, src: crop, cands };
+        }
+      }
+
+      let bestCand = null;
+      const noteBest = (src, cands) => {
+        if (!cands.length) return;
+        const area = videoAreaOfCandidate(src, cands[0]);
+        if (!bestCand || area > bestCand.area) bestCand = { src, qr: cands[0], area };
+      };
+
+      const src720 = frameAt(MAX_DIM_ALT);
+      recordEvent(`S1 720 full: frame ${src720.width}x${src720.height}`);
+      const cands720 = collectCarrierCandidates(src720, "S1 720 full");
+      let dm = tryDMFromCandidates(src720, cands720, "S1 720 full");
+      if (dm) return { dm, src: src720, cands: cands720 };
+      noteBest(src720, cands720);
+
+      const src960 = frameAt(MAX_DIM_FAST);
+      recordEvent(`S1 960 full: frame ${src960.width}x${src960.height}${deep ? " deep" : ""}`);
+      const cands960 = collectCarrierCandidates(src960, "S1 960 full", deep);
+      dm = tryDMFromCandidates(src960, cands960, "S1 960 full");
+      if (dm) return { dm, src: src960, cands: cands960 };
+      noteBest(src960, cands960);
+
+      if (bestCand) {
+        const videoQr = mapQrLocation(bestCand.qr, bestCand.src.map);
+        const rect = rectFromPoints(qrPoints(videoQr), 0.28);
+        const crop = rect && cropVideo(rect, 1100);
+        if (crop) {
+          recordEvent(`S1 fullres crop: ${crop.width}x${crop.height}`);
+          const s = crop.scale || 1;
+          const cropQr = mapQrLocation(videoQr, p => ({ x: (p.x - crop.rect.sx) * s, y: (p.y - crop.rect.sy) * s }));
+          dm = decodeDMFromCarrier(crop, cropQr, "S1 fullres crop");
+          if (dm) return { dm, src: crop, cands: [cropQr] };
+          const cropCands = collectCarrierCandidates(crop, "S1 fullres crop");
+          dm = tryDMFromCandidates(crop, cropCands, "S1 fullres crop");
+          if (dm) return { dm, src: crop, cands: cropCands };
+        }
+      }
+      return null;
+    }
+
+    async function runM2Ladder(profile, opts = {}) {
+      if (!video.videoWidth) return null;
+
+      if (matrixCarrier && matrixCarrier.rect) {
+        const crop = cropVideo(matrixCarrier.rect, 1100);
         if (crop) {
           const phase = opts.immediate ? "F0.5 carrier同フレームcrop" : "F0 carrier幾何crop";
           recordEvent(`${phase}: crop ${crop.width}x${crop.height}`);
-          const hit = tryDecodeQRPart(crop, profile, phase);
+          const hit = tryDecodeQRPart(crop, profile, phase, true);
           if (hit) return hit;
-        }
-      }
-
-      if (barcodeDetector) {
-        try {
-          const bdT0 = performance.now();
-          const boxes = await barcodeDetector.detect(video);
-          const bdElapsed = performance.now() - bdT0;
-          recordPhase((target === "M1_DM" ? "Stage1" : "Stage3") + " / F1 BarcodeDetector", bdElapsed, boxes && boxes.length ? "success" : "fail", `bbox=${boxes ? boxes.length : 0}`);
-          const sorted = Array.from(boxes || []).filter(b => b.boundingBox).sort((a, b) => {
-            return (b.boundingBox.width * b.boundingBox.height) - (a.boundingBox.width * a.boundingBox.height);
-          }).slice(0, 3);
-          for (const b of sorted) {
-            const bb = b.boundingBox;
-            const pad = Math.max(70, Math.max(bb.width, bb.height) * 0.55);
-            const crop = cropVideo({ sx: bb.x - pad, sy: bb.y - pad, sw: bb.width + pad * 2, sh: bb.height + pad * 2 });
-            if (!crop) continue;
-            recordEvent(`F1 BD crop: ${Math.round(bb.x)},${Math.round(bb.y)} ${Math.round(bb.width)}x${Math.round(bb.height)} -> ${crop.width}x${crop.height}`);
-            if (target === "M1_DM") {
-              for (const qr of collectQRCandidates(crop, null)) {
-                const dm = decodeDMFromCarrier(crop, qr, "F1 BD carrier crop");
-                if (dm) return dm;
-              }
-            } else {
-              const hit = tryDecodeQRPart(crop, profile, "F1 BD carrier crop");
-              if (hit) return hit;
+          const cropMax = Math.max(crop.width, crop.height);
+          if (cropMax > 430) {
+            const small = cropVideo(matrixCarrier.rect, Math.round(cropMax * 0.55));
+            if (small) {
+              recordEvent(`${phase} small: crop ${small.width}x${small.height}`);
+              const hit2 = tryDecodeQRPart(small, profile, phase + " small", false);
+              if (hit2) return hit2;
             }
           }
-        } catch (e) {}
-      }
-
-      if (target === "M1_DM" && window.jsQR && jsQR.locateOnly) {
-        const phase = "F1.5 jsQR locator-only 960";
-        const src = frameAt(MAX_DIM_FAST);
-        recordEvent(`${phase}: frame ${src.width}x${src.height}`);
-        for (const qr of collectLocatorOnlyCandidates(src, phase)) {
-          const videoQr = mapQrLocation(qr, src.map);
-          const rect = rectFromPoints(qrPoints(videoQr), 0.28);
-          const crop = rect && cropVideo(rect);
-          if (!crop) continue;
-          const cropQr = mapQrLocation(videoQr, p => ({ x: p.x - crop.rect.sx, y: p.y - crop.rect.sy }));
-          recordEvent(`${phase}: crop ${crop.width}x${crop.height}`);
-          const dm = decodeDMFromCarrier(crop, cropQr, phase + " crop");
-          if (dm) return dm;
         }
       }
+      if (opts.immediate) return null;
 
-      const scales = opts.stage3 ? [MAX_DIM_FAST, MAX_DIM_ALT, Math.max(video.videoWidth, video.videoHeight)] : [MAX_DIM_FAST, MAX_DIM_ALT];
+      const deepNative = opts.stage3 && stage3Miss > 0 && stage3Miss % 3 === 0;
+      const scales = [MAX_DIM_ALT, MAX_DIM_FAST];
+      if (deepNative) scales.push(Math.max(video.videoWidth, video.videoHeight));
       for (const maxDim of scales) {
         const src = frameAt(maxDim);
-        const phase = maxDim === MAX_DIM_FAST ? "F2 960 full" : (maxDim === MAX_DIM_ALT ? "F3 720 full" : "F4 full");
+        const phase = maxDim === MAX_DIM_ALT ? "M2 720 full" : (maxDim === MAX_DIM_FAST ? "M2 960 full" : "M2 native full");
         recordEvent(`${phase}: frame ${src.width}x${src.height}`);
-        if (target === "M1_DM") {
-          for (const qr of collectQRCandidates(src, null)) {
-            const dm = decodeDMFromCarrier(src, qr, phase);
-            if (dm) return dm;
-          }
-        } else {
-          const hit = tryDecodeQRPart(src, profile, phase);
-          if (hit) return hit;
-        }
+        const hit = tryDecodeQRPart(src, profile, phase, false);
+        if (hit) return hit;
       }
       return null;
     }
@@ -1133,13 +1180,17 @@
       }
       drawOverlay();
       try {
+        kickBarcodeDetectorHint();
         if (!firstDM) {
           setStage("stage1");
           setStatus("Stage1: DM部を探索中...");
-          const dm = await runMatrixLadder("M1_DM", { label: "DM plain" });
-          if (dm) {
-            firstDM = dm;
-            const mgmt = parseStandardMgmt(dm.managementCode32 ?? dm.managementCode, dm.managementFlags16);
+          const deep = stage1Miss > 0 && stage1Miss % 3 === 0;
+          const s1 = await runStage1(deep);
+          if (!s1) {
+            stage1Miss++;
+          } else {
+            firstDM = s1.dm;
+            const mgmt = parseStandardMgmt(s1.dm.managementCode32 ?? s1.dm.managementCode, s1.dm.managementFlags16);
             matrixProfile = buildMatrixProfile(mgmt);
             if (mgmt && mgmt.sameDataFlag) {
               secondQR = { text: firstDM.text, data: firstDM.text, points: matrixCarrier && matrixCarrier.points };
@@ -1148,13 +1199,24 @@
             }
             setStage("pre");
             setStatus(`即時プリロケート: QR部 ${matrixProfile.label}`);
-            const pre = await runMatrixLadder("M2_QR", matrixProfile, { immediate: true });
+            let pre = null;
+            if (!matrixProfile.acceptRaw && s1.cands && s1.cands.length) {
+              const t0 = performance.now();
+              for (const c of s1.cands) {
+                const hit = acceptQR(c, s1.src, matrixProfile, "S1 candidate reuse");
+                if (hit && !hit.rawOnly) { pre = hit; break; }
+              }
+              recordPhase("S1 candidate reuse / QR accept", performance.now() - t0, pre ? "success" : "fail",
+                `cands=${s1.cands.length}`);
+            }
+            if (!pre) pre = await runM2Ladder(matrixProfile, { immediate: true });
             if (await dispatchM2(pre)) return;
           }
         } else {
           setStage("stage3");
           setStatus(`Stage3: QR部 ${matrixProfile.label} 探索中...`);
-          const hit = await runMatrixLadder("M2_QR", matrixProfile, { stage3: true });
+          const hit = await runM2Ladder(matrixProfile, { stage3: true });
+          if (!hit) stage3Miss++;
           if (await dispatchM2(hit)) return;
         }
       } finally {
@@ -1457,6 +1519,9 @@
       matrixCarrier = null;
       savedEncryptedQr = null;
       appMask = null;
+      bdHint = null;
+      stage1Miss = 0;
+      stage3Miss = 0;
       trace = [];
       frameNo = 0;
       debugStats = newDebugStats();
