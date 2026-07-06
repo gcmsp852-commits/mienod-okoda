@@ -209,7 +209,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader3</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -862,8 +862,9 @@
       }
       const elapsed = performance.now() - t0;
       const list = Array.isArray(res) ? res : (res ? [res] : []);
+      const fixedCount = list.filter(q => q && q.probeMeta && q.probeMeta.alignmentForcedExpected).length;
       recordPhase(phase + " / QR locator-only", elapsed, list.length ? "success" : "fail",
-        `src=${src.width}x${src.height} locations=${list.length}`);
+        `src=${src.width}x${src.height} locations=${list.length} alignFixed=${fixedCount}`);
       return list.sort((a, b) => candidateArea(b) - candidateArea(a)).slice(0, 3);
     }
 

@@ -450,7 +450,10 @@ function jsQR(data, width, height, providedOptions) {
         extractRawForFailed: providedOptions.extractRawForFailed,
         sysEncDecode: providedOptions.sysEncDecode,
         preBinarized: providedOptions.preBinarized,
-        singleLocate: providedOptions.singleLocate
+        singleLocate: providedOptions.singleLocate,
+        debugProbe: providedOptions.debugProbe,
+        probeCollector: providedOptions.probeCollector,
+        forceExpectedAlignmentCandidate: providedOptions.forceExpectedAlignmentCandidate
     };
     var shouldInvert = options.inversionAttempts === "attemptBoth" || options.inversionAttempts === "invertFirst";
     var tryInvertedFirst = options.inversionAttempts === "onlyInvert" || options.inversionAttempts === "invertFirst";
@@ -494,6 +497,8 @@ function locationToQRLike(location) {
     return {
         isLocatorOnly: true,
         dimension: dimension,
+        moduleSize: location.moduleSize,
+        probeMeta: location.probeMeta,
         location: {
             topRightCorner: project(dimension, 0),
             topLeftCorner: project(0, 0),
@@ -512,6 +517,8 @@ function locateOnly(data, width, height, providedOptions) {
         inversionAttempts: providedOptions.inversionAttempts || "dontInvert",
         preBinarized: providedOptions.preBinarized,
         singleLocate: providedOptions.singleLocate !== false,
+        debugProbe: providedOptions.debugProbe !== false,
+        forceExpectedAlignmentCandidate: providedOptions.forceExpectedAlignmentCandidate !== false,
         maxFinderPatterns: providedOptions.maxFinderPatterns,
         maxGroups: providedOptions.maxGroups
     };
@@ -10394,6 +10401,10 @@ function locate(matrix, options) {
     var isSingle = options && options.singleLocate;
     var maxGroups = isSingle ? 3 : 10;
     var groupsToProcess = finderPatternGroups.slice(0, maxGroups);
+    var shouldAddExpectedAlignment = function (alignment) {
+        return !!(alignment && alignment.alignmentUsed && alignment.alignmentExpected &&
+            options && (options.debugProbe || options.forceExpectedAlignmentCandidate));
+    };
     for (var _i = 0, groupsToProcess_1 = groupsToProcess; _i < groupsToProcess_1.length; _i++) {
         var group = groupsToProcess_1[_i];
         var _b = reorderFinderPatterns(group.points[0], group.points[1], group.points[2]), topRight = _b.topRight, topLeft = _b.topLeft, bottomLeft = _b.bottomLeft;
@@ -10403,11 +10414,36 @@ function locate(matrix, options) {
                 alignmentPattern: { x: alignment.alignmentPattern.x, y: alignment.alignmentPattern.y },
                 bottomLeft: { x: bottomLeft.x, y: bottomLeft.y },
                 dimension: alignment.dimension,
+                moduleSize: alignment.moduleSize,
                 topLeft: { x: topLeft.x, y: topLeft.y },
                 topRight: { x: topRight.x, y: topRight.y },
+                probeMeta: {
+                    alignmentForcedExpected: false,
+                    alignmentDistance: alignment.alignmentDistance,
+                    alignmentTolerance: alignment.alignmentTolerance,
+                    alignmentExpected: alignment.alignmentExpected,
+                    alignmentUsed: alignment.alignmentUsed
+                },
             });
+            if (shouldAddExpectedAlignment(alignment)) {
+                result.push({
+                    alignmentPattern: { x: alignment.alignmentExpected.x, y: alignment.alignmentExpected.y },
+                    bottomLeft: { x: bottomLeft.x, y: bottomLeft.y },
+                    dimension: alignment.dimension,
+                    moduleSize: alignment.moduleSize,
+                    topLeft: { x: topLeft.x, y: topLeft.y },
+                    topRight: { x: topRight.x, y: topRight.y },
+                    probeMeta: {
+                        alignmentForcedExpected: true,
+                        alignmentDistance: alignment.alignmentDistance,
+                        alignmentTolerance: alignment.alignmentTolerance,
+                        alignmentExpected: alignment.alignmentExpected,
+                        alignmentUsed: alignment.alignmentUsed
+                    },
+                });
+            }
             // ★ singleLocate: 2つ見つかったら十分
-            if (isSingle && result.length >= 2) break;
+            if (isSingle && result.length >= 3) break;
         }
         // ★ recenter は精度に重要なので常に実行（Ver5等の高バージョンで効果大）
         var midTopRight = recenterLocation(matrix, topRight);
@@ -10419,10 +10455,35 @@ function locate(matrix, options) {
                 alignmentPattern: { x: centeredAlignment.alignmentPattern.x, y: centeredAlignment.alignmentPattern.y },
                 bottomLeft: { x: midBottomLeft.x, y: midBottomLeft.y },
                 dimension: centeredAlignment.dimension,
+                moduleSize: centeredAlignment.moduleSize,
                 topLeft: { x: midTopLeft.x, y: midTopLeft.y },
                 topRight: { x: midTopRight.x, y: midTopRight.y },
+                probeMeta: {
+                    alignmentForcedExpected: false,
+                    alignmentDistance: centeredAlignment.alignmentDistance,
+                    alignmentTolerance: centeredAlignment.alignmentTolerance,
+                    alignmentExpected: centeredAlignment.alignmentExpected,
+                    alignmentUsed: centeredAlignment.alignmentUsed
+                },
             });
-            if (isSingle && result.length >= 2) break;
+            if (shouldAddExpectedAlignment(centeredAlignment)) {
+                result.push({
+                    alignmentPattern: { x: centeredAlignment.alignmentExpected.x, y: centeredAlignment.alignmentExpected.y },
+                    bottomLeft: { x: midBottomLeft.x, y: midBottomLeft.y },
+                    dimension: centeredAlignment.dimension,
+                    moduleSize: centeredAlignment.moduleSize,
+                    topLeft: { x: midTopLeft.x, y: midTopLeft.y },
+                    topRight: { x: midTopRight.x, y: midTopRight.y },
+                    probeMeta: {
+                        alignmentForcedExpected: true,
+                        alignmentDistance: centeredAlignment.alignmentDistance,
+                        alignmentTolerance: centeredAlignment.alignmentTolerance,
+                        alignmentExpected: centeredAlignment.alignmentExpected,
+                        alignmentUsed: centeredAlignment.alignmentUsed
+                    },
+                });
+            }
+            if (isSingle && result.length >= 3) break;
         }
     }
     if (result.length === 0) {
@@ -10463,12 +10524,21 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         var sizeScore = scorePattern({ x: Math.floor(x), y: Math.floor(y) }, [1, 1, 1], matrix);
         // 菱形パターンの場合は sizeScore が Infinity または非常に悪くなるため、距離 d を最優先で評価する。
         var score = (d * 100) + (sizeScore === Infinity ? 50 : sizeScore);
-        return { x: x, y: y, score: score };
+        return { x: x, y: y, score: score, distance: d };
     })
         .filter(function (v) { return !!v; })
         .sort(function (a, b) { return a.score - b.score; });
-    var alignmentPattern = modulesBetweenFinderPatterns >= 15 && alignmentPatterns.length ? alignmentPatterns[0] : expectedAlignmentPattern;
-    return { alignmentPattern: alignmentPattern, dimension: dimension };
+    var alignmentUsed = modulesBetweenFinderPatterns >= 15 && alignmentPatterns.length ? alignmentPatterns[0] : null;
+    var alignmentPattern = alignmentUsed ? alignmentUsed : expectedAlignmentPattern;
+    return {
+        alignmentPattern: alignmentPattern,
+        dimension: dimension,
+        moduleSize: moduleSize,
+        alignmentDistance: alignmentUsed ? alignmentUsed.distance : null,
+        alignmentTolerance: 2.5,
+        alignmentExpected: { x: expectedAlignmentPattern.x, y: expectedAlignmentPattern.y },
+        alignmentUsed: alignmentUsed ? { x: alignmentUsed.x, y: alignmentUsed.y, score: alignmentUsed.score } : null
+    };
 }
 
 
