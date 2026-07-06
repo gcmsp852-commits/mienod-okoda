@@ -209,7 +209,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader4</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -747,7 +747,7 @@
         return {
           kind: "appenc-raw",
           label: "app encrypted raw",
-          optsList: [{ sysEncDecode: true, extractRawForFailed: true, multi: true }],
+          optsList: [{ sysEncDecode: true, captureAppEncDataBytes: true, extractRawForFailed: true, multi: true }],
           acceptRaw: true
         };
       }
@@ -947,8 +947,12 @@
     function acceptQR(qr, src, profile, phase) {
       if (!qr || !qr.location) return null;
       if (profile && profile.acceptRaw && qr.isRaw) {
+        if (!qr.dataBytes || !qr.dataBytes.length) {
+          recordEvent(`${phase}: QR raw rejected no_dataBytes`);
+          return null;
+        }
         savedEncryptedQr = { raw: qr, phase };
-        recordEvent(`${phase}: QR raw candidate saved`);
+        recordEvent(`${phase}: QR raw candidate saved dataBytes=${qr.dataBytes.length}`);
         addTrace(`${phase}: QR raw candidate saved`);
         return { rawOnly: true };
       }

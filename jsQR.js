@@ -448,6 +448,7 @@ function jsQR(data, width, height, providedOptions) {
         extractRawOnly: providedOptions.extractRawOnly,
         multi: providedOptions.multi,
         extractRawForFailed: providedOptions.extractRawForFailed,
+        captureAppEncDataBytes: providedOptions.captureAppEncDataBytes,
         sysEncDecode: providedOptions.sysEncDecode,
         preBinarized: providedOptions.preBinarized,
         singleLocate: providedOptions.singleLocate,
@@ -1017,6 +1018,27 @@ function decodeMatrix(matrix, options) {
         for (var b = 0; b < numBlocks; b++) {
             correctedCodewords[wi++] = correctedBlocksArr[b][blockPos[b]++];
         }
+    }
+    if (options && options.captureAppEncDataBytes && !(options.appEncMask && options.appEncMask.length > 0)) {
+        return {
+            isRaw: true,
+            codewords: correctedCodewords,
+            correctedCodewords: correctedCodewords,
+            dataBytes: Array.from(resultBytes),
+            encryptedDataBytes: Array.from(resultBytes),
+            version: version,
+            versionNumber: version.versionNumber,
+            formatInfo: formatInfo,
+            rawMatrixData: {
+                codewords: correctedCodewords,
+                correctedCodewords: correctedCodewords,
+                dataBytes: Array.from(resultBytes),
+                encryptedDataBytes: Array.from(resultBytes),
+                version: version,
+                versionNumber: version.versionNumber,
+                formatInfo: formatInfo
+            }
+        };
     }
     var decodedBytes = resultBytes;
     if (appEncMask && appEncMask.length > 0) {
