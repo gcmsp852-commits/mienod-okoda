@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>QR Matrix Reader2</title>
+  <title>QR Matrix Reader</title>
   <script src="jsQR.js"></script>
   <style>
     :root {
@@ -209,7 +209,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader2</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -666,6 +666,25 @@
       ];
     }
 
+    function mapQrLocation(qr, map) {
+      if (!qr || !qr.location) return qr;
+      const l = qr.location;
+      const out = { ...qr, location: { ...l } };
+      for (const key of [
+        "topLeftCorner",
+        "topRightCorner",
+        "bottomRightCorner",
+        "bottomLeftCorner",
+        "topLeftFinderPattern",
+        "topRightFinderPattern",
+        "bottomLeftFinderPattern",
+        "bottomRightAlignmentPattern"
+      ]) {
+        if (l[key]) out.location[key] = map(l[key]);
+      }
+      return out;
+    }
+
     function itemFromQR(qr, map = p => p) {
       return {
         text: qr.data || qr.text || "",
@@ -827,6 +846,25 @@
         }
       }
       return Array.from(found.values()).sort((a, b) => candidateArea(b) - candidateArea(a)).slice(0, 8);
+    }
+
+    function collectLocatorOnlyCandidates(src, phase) {
+      if (!window.jsQR || !jsQR.locateOnly) return [];
+      let res = null;
+      const t0 = performance.now();
+      try {
+        res = jsQR.locateOnly(src.imageData.data, src.width, src.height, {
+          inversionAttempts: "dontInvert",
+          singleLocate: true
+        });
+      } catch (e) {
+        res = null;
+      }
+      const elapsed = performance.now() - t0;
+      const list = Array.isArray(res) ? res : (res ? [res] : []);
+      recordPhase(phase + " / QR locator-only", elapsed, list.length ? "success" : "fail",
+        `src=${src.width}x${src.height} locations=${list.length}`);
+      return list.sort((a, b) => candidateArea(b) - candidateArea(a)).slice(0, 3);
     }
 
     function decodeDMFromCarrier(src, qr, phase) {
@@ -1045,6 +1083,22 @@
         } catch (e) {}
       }
 
+      if (target === "M1_DM" && window.jsQR && jsQR.locateOnly) {
+        const phase = "F1.5 jsQR locator-only 960";
+        const src = frameAt(MAX_DIM_FAST);
+        recordEvent(`${phase}: frame ${src.width}x${src.height}`);
+        for (const qr of collectLocatorOnlyCandidates(src, phase)) {
+          const videoQr = mapQrLocation(qr, src.map);
+          const rect = rectFromPoints(qrPoints(videoQr), 0.28);
+          const crop = rect && cropVideo(rect);
+          if (!crop) continue;
+          const cropQr = mapQrLocation(videoQr, p => ({ x: p.x - crop.rect.sx, y: p.y - crop.rect.sy }));
+          recordEvent(`${phase}: crop ${crop.width}x${crop.height}`);
+          const dm = decodeDMFromCarrier(crop, cropQr, phase + " crop");
+          if (dm) return dm;
+        }
+      }
+
       const scales = opts.stage3 ? [MAX_DIM_FAST, MAX_DIM_ALT, Math.max(video.videoWidth, video.videoHeight)] : [MAX_DIM_FAST, MAX_DIM_ALT];
       for (const maxDim of scales) {
         const src = frameAt(maxDim);
@@ -1172,7 +1226,33 @@
       9: "046563d6db3eae744da941ff7084b376fb2852f00197de9d1dee81e66c2ad659187cd1a36ef5719901",
       10: "04fe13aaeb907d22d0f2dbb9d873fca32835f651974ea86d7f36117c8c0506324f9b0c975e41528096"
     };
-    const ECDSA_SENDER_NAMES = { 1: "TRI", 2: "Taketomo", 3: "SECOM", 4: "Nagoya Bar", 5: "Aichi Bar", 6: "Nikkei", 7: "Saitama", 8: "Tokai", 9: "TRI Education", 10: "Waseda" };
+    /*
+    const ECDSA_SENDER_NAMES = {
+      1: "テララコード研究所",
+      2: "タケトモデータ",
+      3: "セコムセキュリティ",
+      4: "名古屋弁護士会",
+      5: "愛知司法書士会",
+      6: "情報経済省（日本",
+      7: "西京県公安委員会",
+      8: "南海県東陸市",
+      9: "テララ教育福祉財団",
+      10: "早慶大学"
+    };
+
+    */
+    const ECDSA_SENDER_NAMES = {
+      1: "\u30c6\u30e9\u30e9\u30b3\u30fc\u30c9\u7814\u7a76\u6240",
+      2: "\u30bf\u30b1\u30c8\u30e2\u30c7\u30fc\u30bf",
+      3: "\u30bb\u30b3\u30e0\u30bb\u30ad\u30e5\u30ea\u30c6\u30a3",
+      4: "\u540d\u53e4\u5c4b\u5f01\u8b77\u58eb\u4f1a",
+      5: "\u611b\u77e5\u53f8\u6cd5\u66f8\u58eb\u4f1a",
+      6: "\u60c5\u5831\u7d4c\u6e08\u7701\uff08\u65e5\u672c",
+      7: "\u897f\u4eac\u770c\u516c\u5b89\u59d4\u54e1\u4f1a",
+      8: "\u5357\u6d77\u770c\u6771\u9678\u5e02",
+      9: "\u30c6\u30e9\u30e9\u6559\u80b2\u798f\u7949\u8ca1\u56e3",
+      10: "\u65e9\u6176\u5927\u5b66"
+    };
 
     function bigMod(a, m) { return ((a % m) + m) % m; }
     function modInverse(a, m) {

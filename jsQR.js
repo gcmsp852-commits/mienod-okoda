@@ -473,6 +473,64 @@ function jsQR(data, width, height, providedOptions) {
     return result;
 }
 jsQR.default = jsQR;
+function locationToQRLike(location) {
+    if (!location || !location.topLeft || !location.topRight || !location.bottomLeft || !location.dimension)
+        return null;
+    var dimension = location.dimension;
+    var span = dimension - 7;
+    if (span <= 0)
+        return null;
+    var tl = location.topLeft;
+    var tr = location.topRight;
+    var bl = location.bottomLeft;
+    var ax = { x: (tr.x - tl.x) / span, y: (tr.y - tl.y) / span };
+    var bx = { x: (bl.x - tl.x) / span, y: (bl.y - tl.y) / span };
+    function project(u, v) {
+        return {
+            x: tl.x - ax.x * 3.5 - bx.x * 3.5 + ax.x * u + bx.x * v,
+            y: tl.y - ax.y * 3.5 - bx.y * 3.5 + ax.y * u + bx.y * v
+        };
+    }
+    return {
+        isLocatorOnly: true,
+        dimension: dimension,
+        location: {
+            topRightCorner: project(dimension, 0),
+            topLeftCorner: project(0, 0),
+            bottomRightCorner: project(dimension, dimension),
+            bottomLeftCorner: project(0, dimension),
+            topRightFinderPattern: location.topRight,
+            topLeftFinderPattern: location.topLeft,
+            bottomLeftFinderPattern: location.bottomLeft,
+            bottomRightAlignmentPattern: location.alignmentPattern
+        }
+    };
+}
+function locateOnly(data, width, height, providedOptions) {
+    if (providedOptions === void 0) { providedOptions = {}; }
+    var options = {
+        inversionAttempts: providedOptions.inversionAttempts || "dontInvert",
+        preBinarized: providedOptions.preBinarized,
+        singleLocate: providedOptions.singleLocate !== false,
+        maxFinderPatterns: providedOptions.maxFinderPatterns,
+        maxGroups: providedOptions.maxGroups
+    };
+    var shouldInvert = options.inversionAttempts === "attemptBoth" || options.inversionAttempts === "invertFirst";
+    var tryInvertedFirst = options.inversionAttempts === "onlyInvert" || options.inversionAttempts === "invertFirst";
+    var _a = options.preBinarized ? buildBitMatrixFromBinary(data, width, height, shouldInvert) : binarizer_1.binarize(data, width, height, shouldInvert), binarized = _a.binarized, inverted = _a.inverted;
+    var locations = locator_1.locate(tryInvertedFirst ? inverted : binarized, options) || [];
+    if (!locations.length && (options.inversionAttempts === "attemptBoth" || options.inversionAttempts === "invertFirst")) {
+        locations = locator_1.locate(tryInvertedFirst ? binarized : inverted, options) || [];
+    }
+    var out = [];
+    for (var i = 0; i < locations.length; i++) {
+        var qr = locationToQRLike(locations[i]);
+        if (qr)
+            out.push(qr);
+    }
+    return out.length ? out : null;
+}
+jsQR.locateOnly = locateOnly;
 jsQR.resumeDecode = function (rawData, appMask) {
     if (!rawData)
         return null;
@@ -904,18 +962,10 @@ function decodeMatrix(matrix, options) {
         return null;
     }
     var totalBytes = dataBlocks.reduce(function (a, b) { return a + b.numDataCodewords; }, 0);
-    // Ver2.8以降のユーザ暗号化は data-only XOR。
-    // QRの最終codeword列はデータ部が先、ECC部が後なので、RS前にデータ部だけXOR解除する。
     var appEncMask = options ? options.appEncMask : undefined;
-    if (appEncMask && appEncMask.length > 0) {
-        for (var i = 0; i < totalBytes && i < codewords.length; i++) {
-            codewords[i] ^= appEncMask[i];
-        }
-        dataBlocks = getDataBlocks(codewords, version, ecLevel);
-        if (!dataBlocks) {
-            return null;
-        }
-    }
+    // QR Matrix app encryption is applied before ECC generation on the generator side.
+    // Therefore the reader must first RS-correct the encrypted data bytes, then XOR only
+    // the corrected data bytes before payload decoding.
     var resultBytes = new Uint8ClampedArray(totalBytes);
     var resultIndex = 0;
     var correctedBlocksArr = []; // ★ 各ブロックの訂正済みバイト配列を保持
@@ -961,10 +1011,17 @@ function decodeMatrix(matrix, options) {
             correctedCodewords[wi++] = correctedBlocksArr[b][blockPos[b]++];
         }
     }
+    var decodedBytes = resultBytes;
+    if (appEncMask && appEncMask.length > 0) {
+        decodedBytes = new Uint8ClampedArray(resultBytes.length);
+        for (var mi = 0; mi < resultBytes.length; mi++) {
+            decodedBytes[mi] = resultBytes[mi] ^ (appEncMask[mi] & 0xFF);
+        }
+    }
     try {
-        var res = decodeData_1.decode(resultBytes, version.versionNumber);
+        var res = decodeData_1.decode(decodedBytes, version.versionNumber);
         res.codewords = correctedCodewords; // ★ RS訂正済み再インタリーブコード語
-        res.dataBytes = Array.from(resultBytes); // ★ RS訂正済みデータバイト（ECC除く）
+        res.dataBytes = Array.from(decodedBytes); // ★ RS訂正済みデータバイト（ECC除く）
         if (options && options.extractRawForFailed) {
             res.rawMatrixData = { codewords: correctedCodewords, version: version, formatInfo: formatInfo };
         }
@@ -972,7 +1029,7 @@ function decodeMatrix(matrix, options) {
     }
     catch (_a) {
         if (options && options.extractRawForFailed) {
-            return { isRaw: true, codewords: originalCodewords, version: version, formatInfo: formatInfo };
+            return { isRaw: true, codewords: correctedCodewords, dataBytes: Array.from(resultBytes), version: version, formatInfo: formatInfo };
         }
         return null;
     }
@@ -1015,11 +1072,20 @@ function resumeDecode(rawData, appMask) {
             return null;
         }
         var totalBytes = dataBlocks.reduce(function (a, b) { return a + b.numDataCodewords; }, 0);
-        // 1. マスク（XOR）による暗号解除。Ver2.8互換でデータ部だけを解除し、ECC部は触らない。
-        if (appMask && appMask.length > 0) {
-            for (var i = 0; i < totalBytes && i < decryptedCodewords.length; i++) {
-                decryptedCodewords[i] ^= appMask[i];
+        if (rawData.dataBytes && rawData.dataBytes.length) {
+            var savedBytes = new Uint8ClampedArray(rawData.dataBytes.length);
+            for (var si = 0; si < rawData.dataBytes.length; si++) {
+                savedBytes[si] = rawData.dataBytes[si];
             }
+            if (appMask && appMask.length > 0) {
+                for (var smi = 0; smi < savedBytes.length; smi++) {
+                    savedBytes[smi] = savedBytes[smi] ^ (appMask[smi] & 0xFF);
+                }
+            }
+            var savedRes = decodeData_1.decode(savedBytes, version.versionNumber);
+            savedRes.codewords = rawData.codewords;
+            savedRes.dataBytes = Array.from(savedBytes);
+            return savedRes;
         }
         // 2. ブロック分割＋インタリーブ解除
         dataBlocks = getDataBlocks(decryptedCodewords, version, ecLevel);
@@ -1064,10 +1130,17 @@ function resumeDecode(rawData, appMask) {
                 correctedCodewords[wi++] = correctedBlocksArr[b][blockPos[b]++];
             }
         }
+        var decodedBytes = resultBytes;
+        if (appMask && appMask.length > 0) {
+            decodedBytes = new Uint8ClampedArray(resultBytes.length);
+            for (var mi = 0; mi < resultBytes.length; mi++) {
+                decodedBytes[mi] = resultBytes[mi] ^ (appMask[mi] & 0xFF);
+            }
+        }
         // 4. 文字列へのデコード（Decode payload）
-        var res = decodeData_1.decode(resultBytes, version.versionNumber);
+        var res = decodeData_1.decode(decodedBytes, version.versionNumber);
         res.codewords = correctedCodewords;
-        res.dataBytes = Array.from(resultBytes);
+        res.dataBytes = Array.from(decodedBytes);
         return res;
     }
     catch (e) {
