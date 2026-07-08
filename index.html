@@ -221,7 +221,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader9</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -1926,7 +1926,6 @@
         return;
       }
       await startCamera();
-      startWatchingPosition();
       resetScanState();
       $("resultScreen").style.display = "none";
       $("passwordScreen").style.display = "none";
