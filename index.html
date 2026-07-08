@@ -178,6 +178,18 @@
       font-size: 1.05rem;
       text-align: center;
     }
+    .inlineCheck {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: .92rem;
+    }
+    .inlineCheck input {
+      width: auto;
+      margin: 0;
+    }
     .card {
       background: var(--panel2);
       border: 1px solid var(--line);
@@ -209,7 +221,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader13</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -236,8 +248,21 @@
       <button id="stopBtn" class="secondary" disabled>停止</button>
       <button id="copyLogsBtn" class="secondary">蓄積ログコピー</button>
       <button id="clearLogsBtn" class="secondary">蓄積ログ消去</button>
+      <button id="logoutBtn" class="secondary">端末情報変更</button>
     </div>
     <div id="debugLogCountLabel" class="logcount">蓄積ログ 0件</div>
+  </div>
+
+  <div id="loginScreen" class="overlay">
+    <div class="box">
+      <h2>読取端末情報</h2>
+      <p>読取端末ID条件を判定するため、端末に紐づく情報を登録してください。</p>
+      <input id="loginPhoneInput" type="tel" placeholder="携帯電話番号">
+      <input id="loginEmailInput" type="email" placeholder="メールアドレス">
+      <input id="loginUserNumberInput" type="text" placeholder="利用者番号">
+      <label class="inlineCheck"><input id="rememberReaderId" type="checkbox">この端末情報を記憶する</label>
+      <button id="loginBtn">登録して開始</button>
+    </div>
   </div>
 
   <div id="passwordScreen" class="overlay">
@@ -311,6 +336,17 @@
     let debugSavedForCurrentScan = false;
     let debugStats = null;
     let zoomState = null;
+    let matrixConditionsChecked = false;
+    let currentMatrixReadCountRecordedKey = null;
+
+    const MATRIX_TERMINAL_PROFILE_KEY = "qr_matrix_terminal_profile_v1";
+    const MATRIX_TERMINAL_REMEMBER_KEY = "qr_matrix_reader_remember_v1";
+    const MATRIX_READ_COUNT_STORE_KEY = "qr_matrix_read_counts_v1";
+    let currentTerminalHashes = [];
+    let currentDevicePosition = null;
+    let watchPositionId = null;
+    let currentMunicipalityInfo = null;
+    let currentMunicipalityPromise = null;
 
     function newDebugStats() {
       return {
@@ -631,6 +667,389 @@
         hasMunicipality: (low & 0x0010) !== 0,
         readLimitBits: (low >>> 2) & 0x3
       };
+    }
+
+    function hasValue(value) {
+      return value !== undefined && value !== null;
+    }
+
+    function hashReaderId32(readerId) {
+      let hash = 0x811c9dc5;
+      const text = String(readerId || "");
+      for (let i = 0; i < text.length; i++) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+      }
+      return hash >>> 0;
+    }
+
+    function checkExpiry(expiryExt32) {
+      const year = ((expiryExt32 >>> 28) & 0xF) + 2026;
+      const month = (expiryExt32 >>> 24) & 0xF;
+      const day = (expiryExt32 >>> 19) & 0x1F;
+      const hour = (expiryExt32 >>> 14) & 0x1F;
+      const minute = (expiryExt32 >>> 8) & 0x3F;
+      const second = (expiryExt32 >>> 2) & 0x3F;
+      if (month === 0) return true;
+      const expiryDate = new Date(year, month - 1, day || 1, hour, minute, second);
+      return new Date() <= expiryDate;
+    }
+
+    function updateCurrentDevicePosition(pos) {
+      const nextPosition = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      if (!currentDevicePosition ||
+          Math.abs(currentDevicePosition.lat - nextPosition.lat) > 0.001 ||
+          Math.abs(currentDevicePosition.lon - nextPosition.lon) > 0.001) {
+        currentMunicipalityInfo = null;
+        currentMunicipalityPromise = null;
+      }
+      currentDevicePosition = nextPosition;
+      primeMunicipalityInfo();
+    }
+
+    function startWatchingPosition() {
+      if (!navigator.geolocation || watchPositionId !== null) return;
+      watchPositionId = navigator.geolocation.watchPosition(
+        pos => updateCurrentDevicePosition(pos),
+        err => recordEvent(`geolocation watch failed: ${err && err.message ? err.message : "error"}`),
+        { enableHighAccuracy: true, maximumAge: 5000 }
+      );
+    }
+
+    function matchLocation(qrLat, qrLon, devLat, devLon) {
+      const latDiff = Math.abs(devLat - qrLat);
+      const cosLat = Math.cos(qrLat * Math.PI / 180);
+      const lonThreshold = cosLat > 0 ? 0.0009 / cosLat : 0.0009;
+      const lonDiff = Math.abs(devLon - qrLon);
+      return latDiff <= 0.0009 && lonDiff <= lonThreshold;
+    }
+
+    function checkLocation(latExt24, lonExt24) {
+      const qrLat = (latExt24 / 10000) - 90;
+      const qrLon = (lonExt24 / 10000) - 180;
+      if (currentDevicePosition) {
+        return Promise.resolve(matchLocation(qrLat, qrLon, currentDevicePosition.lat, currentDevicePosition.lon));
+      }
+      return new Promise(resolve => {
+        if (!navigator.geolocation) { resolve(false); return; }
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            updateCurrentDevicePosition(pos);
+            resolve(matchLocation(qrLat, qrLon, currentDevicePosition.lat, currentDevicePosition.lon));
+          },
+          () => resolve(false),
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+        );
+      });
+    }
+
+    function normalizeMuniCd5(value) {
+      const digits = String(value || "").replace(/\D/g, "");
+      if (!digits) return "";
+      return digits.padStart(5, "0").slice(-5);
+    }
+
+    function normalizeQrMunicipalityCode(value) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return "";
+      return String(numeric >>> 0).padStart(6, "0").slice(-6);
+    }
+
+    function getQrMunicipalityScope(code6) {
+      if (code6 === "000000" || code6 === "900001" || code6 === "900002") return "country";
+      if (/^\d{2}0000$/.test(code6)) return "prefecture";
+      return "municipality";
+    }
+
+    const DESIGNATED_CITY_WARD_MAX = {
+      "01100": 10, "04100": 5, "11100": 10, "12100": 6,
+      "14100": 18, "14130": 7, "14150": 3, "15100": 8,
+      "22100": 3, "22130": 7, "23100": 16, "26100": 11,
+      "27100": 24, "27140": 7, "28100": 9, "33100": 4,
+      "34100": 8, "40100": 7, "40130": 7, "43100": 5
+    };
+
+    function matchesDesignatedCityWard(qrCode5, apiMuniCd) {
+      if (!qrCode5 || qrCode5.length !== 5 || !apiMuniCd || apiMuniCd.length !== 5) return false;
+      const wardMax = DESIGNATED_CITY_WARD_MAX[qrCode5];
+      if (wardMax === undefined) return false;
+      const qrNum = parseInt(qrCode5, 10);
+      const apiNum = parseInt(apiMuniCd, 10);
+      if (!Number.isFinite(qrNum) || !Number.isFinite(apiNum)) return false;
+      return apiNum === qrNum || (apiNum >= qrNum + 1 && apiNum <= qrNum + wardMax);
+    }
+
+    function isPositionInCountryCode(countryCode, pos) {
+      if (!pos) return false;
+      const lat = pos.lat;
+      const lon = pos.lon;
+      if (countryCode === "000000") return lat >= 20 && lat <= 46 && lon >= 122 && lon <= 154;
+      if (countryCode === "900001") {
+        return (lat >= 24 && lat <= 50 && lon >= -125 && lon <= -66) ||
+          (lat >= 51 && lat <= 72 && lon >= -170 && lon <= -129) ||
+          (lat >= 18 && lat <= 23 && lon >= -161 && lon <= -154);
+      }
+      if (countryCode === "900002") return lat >= 18 && lat <= 54 && lon >= 73 && lon <= 135;
+      return false;
+    }
+
+    function getCurrentPositionFast() {
+      if (currentDevicePosition) return Promise.resolve(currentDevicePosition);
+      return new Promise(resolve => {
+        if (!navigator.geolocation) { resolve(null); return; }
+        navigator.geolocation.getCurrentPosition(
+          pos => { updateCurrentDevicePosition(pos); resolve(currentDevicePosition); },
+          () => resolve(null),
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+        );
+      });
+    }
+
+    function primeMunicipalityInfo() {
+      if (!currentDevicePosition || currentMunicipalityInfo || currentMunicipalityPromise) return currentMunicipalityPromise;
+      const lat = currentDevicePosition.lat;
+      const lon = currentDevicePosition.lon;
+      const apiUrl = "https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress?lat=" +
+        encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon);
+      currentMunicipalityPromise = fetch(apiUrl)
+        .then(response => response.ok ? response.json() : null)
+        .then(data => {
+          const muniCd = data && data.results ? normalizeMuniCd5(data.results.muniCd) : "";
+          currentMunicipalityInfo = muniCd ? { muniCd } : null;
+          return currentMunicipalityInfo;
+        })
+        .catch(() => null)
+        .finally(() => { currentMunicipalityPromise = null; });
+      return currentMunicipalityPromise;
+    }
+
+    async function getCurrentMunicipalityInfo() {
+      if (currentMunicipalityInfo) return currentMunicipalityInfo;
+      const pos = await getCurrentPositionFast();
+      if (!pos) return null;
+      return await primeMunicipalityInfo();
+    }
+
+    async function checkMunicipality(municipalityExt24) {
+      const qrCode6 = normalizeQrMunicipalityCode(municipalityExt24);
+      if (!qrCode6) return false;
+      const scope = getQrMunicipalityScope(qrCode6);
+      const pos = await getCurrentPositionFast();
+      if (!pos) return false;
+      if (scope === "country") return isPositionInCountryCode(qrCode6, pos);
+      const info = await getCurrentMunicipalityInfo();
+      const apiMuniCd = info ? normalizeMuniCd5(info.muniCd) : "";
+      if (!apiMuniCd) return false;
+      if (scope === "prefecture") return qrCode6.substring(0, 2) === apiMuniCd.substring(0, 2);
+      const qrCode5 = qrCode6.substring(0, 5);
+      const legacyQrCode5 = normalizeMuniCd5(municipalityExt24);
+      if (qrCode5 === apiMuniCd || legacyQrCode5 === apiMuniCd) return true;
+      if (matchesDesignatedCityWard(qrCode5, apiMuniCd)) return true;
+      if (matchesDesignatedCityWard(legacyQrCode5, apiMuniCd)) return true;
+      return false;
+    }
+
+    function normalizeTerminalValue(value) {
+      return String(value || "").trim();
+    }
+
+    function uniqueTerminalValues(values) {
+      const seen = new Set();
+      return values
+        .map(normalizeTerminalValue)
+        .filter(Boolean)
+        .filter(value => {
+          if (seen.has(value)) return false;
+          seen.add(value);
+          return true;
+        });
+    }
+
+    function buildPhoneNumberCandidates(phoneNumber) {
+      const raw = normalizeTerminalValue(phoneNumber);
+      if (!raw) return [];
+      const compact = raw.replace(/[^\d+]/g, "");
+      const digits = raw.replace(/\D/g, "");
+      const candidates = [raw, compact, digits];
+      if (compact.startsWith("+81") && compact.length > 3) candidates.push("0" + compact.slice(3));
+      if (digits.startsWith("81") && digits.length > 2) {
+        candidates.push("0" + digits.slice(2));
+        candidates.push("+" + digits);
+      }
+      if (digits.startsWith("0") && digits.length > 1) {
+        candidates.push("+81" + digits.slice(1));
+        candidates.push("81" + digits.slice(1));
+      }
+      let domesticDigits = "";
+      if (digits.startsWith("0")) domesticDigits = digits;
+      else if (digits.startsWith("81") && digits.length > 2) domesticDigits = "0" + digits.slice(2);
+      if (domesticDigits.length === 11) {
+        const carrier = domesticDigits.slice(0, 3);
+        const middle = domesticDigits.slice(3, 7);
+        const last = domesticDigits.slice(7);
+        const intlCarrier = domesticDigits.slice(1, 3);
+        candidates.push(`${carrier}-${middle}-${last}`);
+        candidates.push(`${carrier} ${middle} ${last}`);
+        candidates.push(`+81-${intlCarrier}-${middle}-${last}`);
+        candidates.push(`+81 ${intlCarrier} ${middle} ${last}`);
+      }
+      return uniqueTerminalValues(candidates);
+    }
+
+    function getTerminalProfile() {
+      return {
+        phone: $("loginPhoneInput") ? $("loginPhoneInput").value.trim() : "",
+        email: $("loginEmailInput") ? $("loginEmailInput").value.trim() : "",
+        userNumber: $("loginUserNumberInput") ? $("loginUserNumberInput").value.trim() : ""
+      };
+    }
+
+    function setTerminalProfile(profile = {}) {
+      if ($("loginPhoneInput")) $("loginPhoneInput").value = profile.phone || "";
+      if ($("loginEmailInput")) $("loginEmailInput").value = profile.email || "";
+      if ($("loginUserNumberInput")) $("loginUserNumberInput").value = profile.userNumber || "";
+    }
+
+    function buildTerminalHashes(profile) {
+      const values = uniqueTerminalValues([
+        ...buildPhoneNumberCandidates(profile.phone),
+        profile.email,
+        profile.userNumber
+      ]);
+      return values.map(value => hashReaderId32(value));
+    }
+
+    function matchesRegisteredTerminalId(readerIdExt32) {
+      if (!hasValue(readerIdExt32)) return true;
+      return currentTerminalHashes.some(hash => (hash >>> 0) === (readerIdExt32 >>> 0));
+    }
+
+    function getReadLimitFromItem(item) {
+      if (!item) return 0;
+      if (hasValue(item.readLimitBits)) return item.readLimitBits & 0x3;
+      const mgmt = parseStandardMgmt(item.managementCode32 ?? item.managementCode, item.managementFlags16);
+      return mgmt ? (mgmt.readLimitBits & 0x3) : 0;
+    }
+
+    function getReadCountKey(item) {
+      const limit = getReadLimitFromItem(item);
+      if (!limit) return "";
+      const managementCode32 = getManagementCode32FromParts(item.managementCode32 ?? item.managementCode, item.managementFlags16) || 0;
+      const fingerprintSource = Array.isArray(item.codewords)
+        ? item.codewords.join(",")
+        : String(item.text || item.data || "");
+      const dataHash = hashReaderId32(fingerprintSource);
+      const uniquePart = hasValue(item.qrTwinUniqueId8) ? String(item.qrTwinUniqueId8 & 0xFF) : "noid";
+      return ["matrix-v1", uniquePart, managementCode32 >>> 0, dataHash >>> 0].join(":");
+    }
+
+    function loadReadCountStore() {
+      try {
+        return JSON.parse(localStorage.getItem(MATRIX_READ_COUNT_STORE_KEY) || "{}") || {};
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function saveReadCountStore(store) {
+      localStorage.setItem(MATRIX_READ_COUNT_STORE_KEY, JSON.stringify(store || {}));
+    }
+
+    function checkReadCountLimit(item) {
+      const limit = getReadLimitFromItem(item);
+      if (!limit) return { ok: true, limit: 0, count: 0, key: "" };
+      const key = getReadCountKey(item);
+      if (!key) return { ok: true, limit: 0, count: 0, key: "" };
+      const store = loadReadCountStore();
+      const entry = store[key] || {};
+      const count = Math.max(0, parseInt(entry.count, 10) || 0);
+      if (count >= limit) {
+        return { ok: false, limit, count, key, message: "読み取り回数が上限に達しました" };
+      }
+      return { ok: true, limit, count, key };
+    }
+
+    function recordReadCountIfNeeded(item) {
+      const check = checkReadCountLimit(item);
+      if (!check.ok || !check.limit || !check.key) return;
+      if (currentMatrixReadCountRecordedKey === check.key) return;
+      const store = loadReadCountStore();
+      const entry = store[check.key] || {};
+      const nextCount = Math.max(0, parseInt(entry.count, 10) || 0) + 1;
+      store[check.key] = {
+        count: nextCount,
+        limit: check.limit,
+        qrTwinUniqueId8: hasValue(item.qrTwinUniqueId8) ? (item.qrTwinUniqueId8 & 0xFF) : null,
+        lastReadAt: new Date().toISOString()
+      };
+      saveReadCountStore(store);
+      currentMatrixReadCountRecordedKey = check.key;
+      recordEvent(`read count recorded ${nextCount}/${check.limit}`);
+    }
+
+    async function ensureMatrixConditionsAllowed(item) {
+      if (!item) return { ok: false, message: "DM部が未確定です" };
+      if (hasValue(item.expiryExt32) && !checkExpiry(item.expiryExt32)) {
+        return { ok: false, message: "読み取りの有効期間が終了しました" };
+      }
+      if (hasValue(item.readerIdExt32) && !matchesRegisteredTerminalId(item.readerIdExt32)) {
+        return { ok: false, message: "読取端末IDが一致しません" };
+      }
+      if (hasValue(item.locationLatExt24) && hasValue(item.locationLonExt24)) {
+        const ok = await checkLocation(item.locationLatExt24, item.locationLonExt24);
+        if (!ok) return { ok: false, message: "読取位置が一致しません" };
+      }
+      if (hasValue(item.municipalityExt24)) {
+        const ok = await checkMunicipality(item.municipalityExt24);
+        if (!ok) return { ok: false, message: "市町村コードが一致しません" };
+      }
+      const readCount = checkReadCountLimit(item);
+      if (!readCount.ok) return { ok: false, message: readCount.message || "読み取り回数が上限に達しました" };
+      return { ok: true };
+    }
+
+    function doLogin() {
+      const profile = getTerminalProfile();
+      if (!profile.phone && !profile.email && !profile.userNumber) {
+        alert("携帯電話番号、メールアドレス、利用者番号のいずれかを入力してください。");
+        return;
+      }
+      currentTerminalHashes = buildTerminalHashes(profile);
+      const remember = $("rememberReaderId") && $("rememberReaderId").checked;
+      if (remember) {
+        localStorage.setItem(MATRIX_TERMINAL_PROFILE_KEY, JSON.stringify(profile));
+        localStorage.setItem(MATRIX_TERMINAL_REMEMBER_KEY, "1");
+      } else {
+        localStorage.removeItem(MATRIX_TERMINAL_PROFILE_KEY);
+        localStorage.removeItem(MATRIX_TERMINAL_REMEMBER_KEY);
+      }
+      if ($("loginScreen")) $("loginScreen").style.display = "none";
+    }
+
+    function doLogout() {
+      currentTerminalHashes = [];
+      localStorage.removeItem(MATRIX_TERMINAL_PROFILE_KEY);
+      localStorage.removeItem(MATRIX_TERMINAL_REMEMBER_KEY);
+      setTerminalProfile({});
+      if ($("rememberReaderId")) $("rememberReaderId").checked = false;
+      if ($("loginScreen")) $("loginScreen").style.display = "flex";
+    }
+
+    function initLogin() {
+      const saved = localStorage.getItem(MATRIX_TERMINAL_PROFILE_KEY);
+      const remember = localStorage.getItem(MATRIX_TERMINAL_REMEMBER_KEY);
+      if (saved && remember === "1") {
+        try {
+          const profile = JSON.parse(saved);
+          setTerminalProfile(profile);
+          currentTerminalHashes = buildTerminalHashes(profile);
+          if ($("rememberReaderId")) $("rememberReaderId").checked = true;
+          if (currentTerminalHashes.length) return;
+        } catch (e) {
+          localStorage.removeItem(MATRIX_TERMINAL_PROFILE_KEY);
+        }
+      }
+      if ($("loginScreen")) $("loginScreen").style.display = "flex";
     }
 
     function itemFromDM(dm) {
@@ -1137,6 +1556,16 @@
             firstDM = dm;
             const mgmt = parseStandardMgmt(dm.managementCode32 ?? dm.managementCode, dm.managementFlags16);
             matrixProfile = buildMatrixProfile(mgmt);
+            if (!matrixConditionsChecked) {
+              matrixConditionsChecked = true;
+              recordEvent("condition check started");
+              const condition = await ensureMatrixConditionsAllowed(firstDM);
+              if (!condition.ok) {
+                showConditionRejected(condition.message);
+                return;
+              }
+              recordEvent("condition check passed");
+            }
             if (mgmt && mgmt.sameDataFlag) {
               secondQR = { text: firstDM.text, data: firstDM.text, points: matrixCarrier && matrixCarrier.points };
               showResult();
@@ -1334,6 +1763,31 @@
       setStatus("パスワード入力待ち");
     }
 
+    function showConditionRejected(message) {
+      isScanning = false;
+      isProcessing = false;
+      clearScanTimeout();
+      setStage(null);
+      drawOverlay();
+      setScanUiActive(false);
+      recordEvent(`condition rejected: ${message}`);
+      const report = buildDebugReport("rejected");
+      saveDebugLog("rejected", report);
+      const mgmt = firstDM ? parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16) : null;
+      $("resultTitle").textContent = "QR Matrix 条件不一致";
+      $("resultDm").textContent = firstDM ? firstDM.text : "-";
+      $("resultQr").textContent = secondQR ? secondQR.text : "-";
+      $("resultDmMeta").textContent = mgmt
+        ? `種別=${matrixProfile ? matrixProfile.label : "-"} / readLimit=${mgmt.readLimitBits}`
+        : "";
+      $("resultQrMeta").textContent = message || "読取条件を満たしていません";
+      $("signatureCard").style.display = "none";
+      $("resultTrace").textContent = report;
+      $("resultScreen").style.display = "flex";
+      $("startBtn").disabled = false;
+      $("stopBtn").disabled = true;
+    }
+
     function showResult(signature = null) {
       isScanning = false;
       isProcessing = false;
@@ -1342,6 +1796,7 @@
       drawOverlay();
       const outcome = signature ? (signature.verified ? "completed_verified" : "completed_signature_failed") : "completed";
       recordEvent(outcome);
+      if (firstDM) recordReadCountIfNeeded(firstDM);
       const report = buildDebugReport(outcome);
       saveDebugLog(outcome, report);
       const mgmt = firstDM ? parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16) : null;
@@ -1455,6 +1910,8 @@
       appMask = null;
       trace = [];
       frameNo = 0;
+      matrixConditionsChecked = false;
+      currentMatrixReadCountRecordedKey = null;
       debugStats = newDebugStats();
       scanStartedPerf = performance.now();
       scanStartedIso = debugStats.startedIso;
@@ -1496,6 +1953,8 @@
     $("stopBtn").addEventListener("click", stopScan);
     $("copyLogsBtn").addEventListener("click", copyAllDebugLog);
     $("clearLogsBtn").addEventListener("click", clearDebugLog);
+    $("loginBtn").addEventListener("click", doLogin);
+    $("logoutBtn").addEventListener("click", doLogout);
     $("modeSwitchBtn").addEventListener("click", () => {
       $("resultScreen").style.display = "none";
       $("passwordScreen").style.display = "none";
@@ -1531,6 +1990,7 @@
         return;
       }
       await startCamera();
+      startWatchingPosition();
       resetScanState();
       $("resultScreen").style.display = "none";
       $("passwordScreen").style.display = "none";
@@ -1560,6 +2020,8 @@
     $("stopBtn").addEventListener("click", stopScan);
     $("copyLogsBtn").addEventListener("click", copyAllDebugLog);
     $("clearLogsBtn").addEventListener("click", clearDebugLog);
+    $("loginBtn").addEventListener("click", doLogin);
+    $("logoutBtn").addEventListener("click", doLogout);
     $("modeSwitchBtn").addEventListener("click", () => {
       $("resultScreen").style.display = "none";
       $("passwordScreen").style.display = "none";
@@ -1590,6 +2052,7 @@
       startScanTimeout();
       requestAnimationFrame(handleFrame);
     });
+    initLogin();
     updateDebugLogCount();
   </script>
 </body>
