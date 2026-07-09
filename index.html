@@ -221,7 +221,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader20</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -287,7 +287,7 @@
         <div id="resultDm" class="text">-</div>
         <div id="resultDmMeta" class="meta"></div>
       </div>
-      <div class="card">
+      <div id="resultQrCard" class="card">
         <label>QR部</label>
         <div id="resultQr" class="text">-</div>
         <div id="resultQrMeta" class="meta"></div>
@@ -610,6 +610,7 @@
       $("resultTitle").textContent = "QR Matrix timeout";
       $("resultDm").textContent = firstDM ? firstDM.text : "-";
       $("resultQr").textContent = secondQR ? secondQR.text : "-";
+      $("resultQrCard").style.display = "";
       $("resultDmMeta").textContent = mgmt ? `profile=${matrixProfile ? matrixProfile.label : "-"} / readLimit=${mgmt.readLimitBits}` : "";
       $("resultQrMeta").textContent = secondQR && secondQR.version ? `version=${secondQR.version.versionNumber || secondQR.version}` : "M2 QR not fixed";
       $("signatureCard").style.display = "none";
@@ -1791,6 +1792,7 @@
       $("resultTitle").textContent = "QR Matrix 条件不一致";
       $("resultDm").textContent = firstDM ? firstDM.text : "-";
       $("resultQr").textContent = secondQR ? secondQR.text : "-";
+      $("resultQrCard").style.display = "";
       $("resultDmMeta").textContent = mgmt
         ? `種別=${matrixProfile ? matrixProfile.label : "-"} / readLimit=${mgmt.readLimitBits}`
         : "";
@@ -1818,6 +1820,7 @@
       $("resultDm").textContent = firstDM ? firstDM.text : "-";
       $("resultQr").textContent = secondQR ? secondQR.text : "-";
       $("resultDmMeta").textContent = mgmt ? `種別=${matrixProfile ? matrixProfile.label : "-"} / readLimit=${mgmt.readLimitBits}` : "";
+      $("resultQrCard").style.display = signature ? "none" : "";
       $("resultQrMeta").textContent = secondQR && secondQR.version ? `version=${secondQR.version.versionNumber || secondQR.version}` : "";
       $("resultTrace").textContent = report;
       if (signature) {
