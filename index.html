@@ -221,7 +221,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader18</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -1166,8 +1166,8 @@
         return {
           kind: "appenc-raw",
           label: "app encrypted raw",
-          optsList: [{ sysEncDecode: true, extractRawForFailed: true, multi: true }],
-          acceptRaw: true
+          optsList: [{ sysEncDecode: true, captureAppEncDataBytes: true, multi: true }],
+          acceptRawAppEnc: true
         };
       }
       if (mgmt && mgmt.sysEncFlag && mgmt.dataTypeBits === 2) {
@@ -1365,11 +1365,25 @@
     */
     function acceptQR(qr, src, profile, phase) {
       if (!qr || !qr.location) return null;
-      if (profile && profile.acceptRaw && qr.isRaw) {
-        savedEncryptedQr = { raw: qr, phase };
-        recordEvent(`${phase}: QR raw candidate saved`);
-        addTrace(`${phase}: QR raw candidate saved`);
-        return { rawOnly: true };
+      if (profile && profile.acceptRawAppEnc) {
+        const hasBytes = !!(qr.isRaw && qr.dataBytes && qr.dataBytes.length);
+        if (hasBytes) {
+          savedEncryptedQr = {
+            raw: {
+              ...qr,
+              encryptedDataBytes: Array.from(qr.dataBytes),
+              dataBytes: Array.from(qr.dataBytes)
+            },
+            phase
+          };
+          recordEvent(`${phase}: QR appEnc raw dataBytes saved`);
+          addTrace(`${phase}: QR appEnc raw dataBytes saved`);
+          return { rawOnly: true };
+        }
+        if (qr.isRaw) {
+          recordEvent(`${phase}: QR raw rejected no_dataBytes`);
+          return null;
+        }
       }
       if (!qr.data || qr.isRaw) {
         recordEvent(`${phase}: QR rejected raw_or_empty`);

@@ -448,6 +448,7 @@ function jsQR(data, width, height, providedOptions) {
         extractRawOnly: providedOptions.extractRawOnly,
         multi: providedOptions.multi,
         extractRawForFailed: providedOptions.extractRawForFailed,
+        captureAppEncDataBytes: providedOptions.captureAppEncDataBytes,
         sysEncDecode: providedOptions.sysEncDecode,
         preBinarized: providedOptions.preBinarized,
         singleLocate: providedOptions.singleLocate,
@@ -1018,6 +1019,25 @@ function decodeMatrix(matrix, options) {
             correctedCodewords[wi++] = correctedBlocksArr[b][blockPos[b]++];
         }
     }
+    if (options && options.captureAppEncDataBytes && !(appEncMask && appEncMask.length > 0)) {
+        return {
+            isRaw: true,
+            codewords: originalCodewords,
+            correctedCodewords: correctedCodewords,
+            dataBytes: Array.from(resultBytes),
+            version: version,
+            versionNumber: version.versionNumber,
+            formatInfo: formatInfo,
+            rawMatrixData: {
+                codewords: originalCodewords,
+                correctedCodewords: correctedCodewords,
+                dataBytes: Array.from(resultBytes),
+                version: version,
+                versionNumber: version.versionNumber,
+                formatInfo: formatInfo
+            }
+        };
+    }
     var decodedBytes = resultBytes;
     if (appEncMask && appEncMask.length > 0) {
         decodedBytes = new Uint8ClampedArray(resultBytes.length);
@@ -1028,6 +1048,7 @@ function decodeMatrix(matrix, options) {
     try {
         var res = decodeData_1.decode(decodedBytes, version.versionNumber);
         res.codewords = correctedCodewords; // ★ RS訂正済み再インタリーブコード語
+        res.correctedCodewords = correctedCodewords;
         res.dataBytes = Array.from(decodedBytes); // ★ RS訂正済みデータバイト（ECC除く）
         if (options && options.extractRawForFailed) {
             res.rawMatrixData = { codewords: correctedCodewords, version: version, formatInfo: formatInfo };
@@ -1035,8 +1056,8 @@ function decodeMatrix(matrix, options) {
         return res;
     }
     catch (_a) {
-        if (options && options.extractRawForFailed) {
-            return { isRaw: true, codewords: correctedCodewords, dataBytes: Array.from(resultBytes), version: version, formatInfo: formatInfo };
+        if (options && (options.extractRawForFailed || options.captureAppEncDataBytes)) {
+            return { isRaw: true, codewords: correctedCodewords, correctedCodewords: correctedCodewords, dataBytes: Array.from(resultBytes), version: version, versionNumber: version.versionNumber, formatInfo: formatInfo };
         }
         return null;
     }
@@ -1090,7 +1111,8 @@ function resumeDecode(rawData, appMask) {
                 }
             }
             var savedRes = decodeData_1.decode(savedBytes, version.versionNumber);
-            savedRes.codewords = rawData.codewords;
+            savedRes.codewords = rawData.correctedCodewords || rawData.codewords;
+            savedRes.correctedCodewords = rawData.correctedCodewords || rawData.codewords;
             savedRes.dataBytes = Array.from(savedBytes);
             return savedRes;
         }
