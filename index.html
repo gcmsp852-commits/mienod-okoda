@@ -4,6 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>QR Matrix Reader</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="apple-touch-icon" href="./icon.png">
+  <meta name="theme-color" content="#101416">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="QRマトリックス">
   <script src="jsQR.js"></script>
   <style>
     :root {
@@ -212,7 +217,7 @@
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader1</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -1810,6 +1815,15 @@
       requestAnimationFrame(handleFrame);
     });
     initLogin();
+  </script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js").catch(error => {
+          console.error("Service Worker registration failed:", error);
+        });
+      });
+    }
   </script>
 </body>
 </html>
