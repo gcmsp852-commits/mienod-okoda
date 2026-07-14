@@ -118,19 +118,6 @@
       z-index: 4;
     }
     .status { color: var(--accent2); font-size: .94rem; text-align: center; min-height: 1.4em; }
-    .phasebar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-    .phase {
-      border: 1px solid var(--line);
-      color: var(--muted);
-      padding: 7px 4px;
-      text-align: center;
-      border-radius: 6px;
-      font-size: .78rem;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .phase.active { border-color: var(--accent); color: var(--accent2); background: rgba(0,188,212,.08); }
     .btnrow { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
     button {
       border: 0;
@@ -204,24 +191,28 @@
     .ok { color: var(--ok); }
     .bad { color: var(--bad); }
     .warn { color: var(--warn); }
-    .debug {
-      max-height: 34dvh;
-      overflow: auto;
-      white-space: pre;
-      word-break: normal;
-      font-size: .78rem;
-      line-height: 1.35;
-      -webkit-overflow-scrolling: touch;
+    #resultScreen {
+      align-items: center;
+      justify-content: center;
+      overflow-y: auto;
     }
-    .logcount {
-      color: var(--muted);
+    #resultImageContainer {
+      display: none;
       text-align: center;
-      font-size: .78rem;
+    }
+    #resultImage {
+      display: block;
+      max-width: 100%;
+      max-height: 240px;
+      margin: 0 auto;
+      object-fit: contain;
+      border: 2px solid #555;
+      border-radius: 8px;
     }
   </style>
 </head>
 <body>
-  <div class="header">QR Matrix Reader22</div>
+  <div class="header">QR Matrix Reader</div>
   <div class="camera">
     <video id="camera" playsinline autoplay muted></video>
     <canvas id="overlayCanvas"></canvas>
@@ -238,19 +229,10 @@
   </div>
   <div class="bottom">
     <div class="status" id="statusText">QRマトリックス専用リーダー</div>
-    <div class="phasebar">
-      <div id="stage1Pill" class="phase">Stage1 DM</div>
-      <div id="prePill" class="phase">即時QR</div>
-      <div id="stage3Pill" class="phase">Stage3 QR</div>
-    </div>
     <div class="btnrow">
       <button id="startBtn">スキャン開始</button>
-      <button id="stopBtn" class="secondary" disabled>停止</button>
-      <button id="copyLogsBtn" class="secondary">蓄積ログコピー</button>
-      <button id="clearLogsBtn" class="secondary">蓄積ログ消去</button>
       <button id="logoutBtn" class="secondary">端末情報変更</button>
     </div>
-    <div id="debugLogCountLabel" class="logcount">蓄積ログ 0件</div>
   </div>
 
   <div id="loginScreen" class="overlay">
@@ -296,9 +278,8 @@
         <label>電子署名</label>
         <div id="signatureText" class="text">-</div>
       </div>
-      <div class="card">
-        <label>Scan Debug</label>
-        <div id="resultTrace" class="text debug">-</div>
+      <div id="resultImageContainer">
+        <img id="resultImage" alt="">
       </div>
       <button id="scanAgainBtn">もう一度スキャン</button>
     </div>
@@ -329,6 +310,7 @@
     const MAX_DIM_ALT = 720;
     const MATRIX_TIMEOUT_MS = 20000;
     const DEBUG_LOG_KEY = "qr_matrix_reader_debug_logs_v1";
+    try { localStorage.removeItem(DEBUG_LOG_KEY); } catch (e) {}
 
     let scanStartedPerf = 0;
     let scanStartedIso = "";
@@ -389,171 +371,6 @@
       debugStats.phases[label] = p;
     }
 
-    function getDebugLogs() {
-      try {
-        const logs = JSON.parse(localStorage.getItem(DEBUG_LOG_KEY) || "[]");
-        return Array.isArray(logs) ? logs : [];
-      } catch (e) {
-        return [];
-      }
-    }
-
-    function setDebugLogs(logs) {
-      localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(logs.slice(-200)));
-      updateDebugLogCount();
-    }
-
-    function updateDebugLogCount() {
-      const el = $("debugLogCountLabel");
-      if (el) el.textContent = `蓄積ログ ${getDebugLogs().length}件`;
-    }
-
-    function summarizeMgmt(item) {
-      if (!item) return "-";
-      const mgmt = parseStandardMgmt(item.managementCode32 ?? item.managementCode, item.managementFlags16);
-      if (!mgmt) return "mgmt=-";
-      return `qrNo=${mgmt.qrNo} enc=${mgmt.encryptionBits.toString(2).padStart(2, "0")} type=${mgmt.dataTypeBits} same=${mgmt.sameDataFlag ? 1 : 0} readLimit=${mgmt.readLimitBits}`;
-    }
-
-    function buildDebugReport(outcome = "completed") {
-      const total = scanStartedPerf ? performance.now() - scanStartedPerf : 0;
-      if (debugStats) {
-        debugStats.outcome = outcome;
-        debugStats.totalMs = total;
-        debugStats.profile = matrixProfile ? `${matrixProfile.kind} / ${matrixProfile.label}` : "-";
-        debugStats.dm = firstDM ? summarizeMgmt(firstDM) : null;
-        debugStats.qr = secondQR ? summarizeMgmt(secondQR) : null;
-      }
-      const s = debugStats || newDebugStats();
-      const lines = [];
-      lines.push("■ QR Matrix 読取デバッグ");
-      lines.push(`開始: ${scanStartedIso || s.startedIso}`);
-      lines.push(`結果: ${outcome}`);
-      lines.push(`総経過: ${fmtMs(s.totalMs ?? total)} / フレーム total=${s.frames.total} Stage1=${s.frames.stage1} Stage3=${s.frames.stage3}`);
-      lines.push(`profile: ${s.profile || "-"}`);
-      lines.push(`DM: ${s.dm || "-"}`);
-      lines.push(`QR: ${s.qr || "-"}`);
-      if (matrixCarrier && matrixCarrier.rect) {
-        const r = matrixCarrier.rect;
-        lines.push(`carrierRect: sx=${Math.round(r.sx)} sy=${Math.round(r.sy)} sw=${Math.round(r.sw)} sh=${Math.round(r.sh)} phase=${matrixCarrier.phase || "-"}`);
-      }
-      lines.push("");
-      lines.push("Phase集計:");
-      const entries = Object.entries(s.phases);
-      if (!entries.length) lines.push("  -");
-      for (const [name, p] of entries) {
-        const avg = p.attempts ? p.elapsed / p.attempts : 0;
-        lines.push(`  ${name}: attempts=${p.attempts} success=${p.success} raw=${p.raw} fail=${p.fail} total=${fmtMs(p.elapsed)} avg=${fmtMs(avg)}`);
-        for (const d of p.details) lines.push(`    - ${d}`);
-      }
-      lines.push("");
-      lines.push("Events:");
-      if (!s.events.length) lines.push("  -");
-      for (const e of s.events) lines.push(`  ${e}`);
-      return lines.join("\n");
-    }
-
-    function saveDebugLog(outcome, report) {
-      if (debugSavedForCurrentScan) return;
-      debugSavedForCurrentScan = true;
-      const logs = getDebugLogs();
-      logs.push({
-        at: new Date().toISOString(),
-        outcome,
-        totalMs: debugStats && debugStats.totalMs,
-        profile: debugStats && debugStats.profile,
-        report
-      });
-      setDebugLogs(logs);
-    }
-
-    async function copyTextToClipboard(text) {
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(text);
-        return true;
-      }
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      const ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-      return ok;
-    }
-
-    /*
-    async function copyAllDebugLog() {
-      const logs = getDebugLogs();
-      if (!logs.length) {
-        alert("蓄積ログはありません。");
-        return;
-      }
-      const text = `■ QR Matrix 読取デバッグログ（蓄積） 件数: ${logs.length} / 出力: ${new Date().toISOString()}\n\n` +
-        logs.map((l, i) => `===== #${i + 1} ${l.at || ""} / ${l.outcome || ""} =====\n${l.report || ""}`).join("\n\n");
-      try {
-        await copyTextToClipboard(text);
-        alert("蓄積ログをコピーしました。");
-      } catch (e) {
-        alert("クリップボードにコピーできませんでした。");
-      }
-    }
-
-    function clearDebugLog() {
-      if (!confirm("蓄積ログを消去しますか？")) return;
-      setDebugLogs([]);
-      alert("蓄積ログを消去しました。");
-    }
-
-    */
-    /*
-    async function copyAllDebugLog() {
-      const logs = getDebugLogs();
-      if (!logs.length) {
-        alert("蓄積ログはありません。");
-        return;
-      }
-      const text = `■ QR Matrix 読取デバッグログ（蓄積） 件数: ${logs.length} / 出力: ${new Date().toISOString()}\n\n` +
-        logs.map((l, i) => `===== #${i + 1} ${l.at || ""} / ${l.outcome || ""} =====\n${l.report || ""}`).join("\n\n");
-      try {
-        await copyTextToClipboard(text);
-        alert("蓄積ログをコピーしました。");
-      } catch (e) {
-        alert("クリップボードにコピーできませんでした。");
-      }
-    }
-
-    function clearDebugLog() {
-      if (!confirm("蓄積ログを消去しますか？")) return;
-      setDebugLogs([]);
-      alert("蓄積ログを消去しました。");
-    }
-
-    */
-    async function copyAllDebugLog() {
-      const logs = getDebugLogs();
-      if (!logs.length) {
-        alert("No accumulated debug logs.");
-        return;
-      }
-      const text = `QR Matrix debug logs count: ${logs.length} / exported: ${new Date().toISOString()}\n\n` +
-        logs.map((l, i) => `===== #${i + 1} ${l.at || ""} / ${l.outcome || ""} =====\n${l.report || ""}`).join("\n\n");
-      try {
-        await copyTextToClipboard(text);
-        alert("Debug logs copied.");
-      } catch (e) {
-        alert("Clipboard copy failed.");
-      }
-    }
-
-    function clearDebugLog() {
-      if (!confirm("Clear accumulated debug logs?")) return;
-      setDebugLogs([]);
-      alert("Debug logs cleared.");
-    }
-
     function clearScanTimeout() {
       if (timeoutTimer) {
         clearTimeout(timeoutTimer);
@@ -568,33 +385,6 @@
       }, MATRIX_TIMEOUT_MS);
     }
 
-    /*
-    function finishWithTimeout() {
-      if (!isScanning && !isProcessing) return;
-      isScanning = false;
-      isProcessing = false;
-      clearScanTimeout();
-      setStage(null);
-      drawOverlay();
-      setStatus("20秒タイムアウト");
-      recordEvent("timeout");
-      const report = buildDebugReport("timeout");
-      saveDebugLog("timeout", report);
-      const mgmt = firstDM ? parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16) : null;
-      $("resultTitle").textContent = "QR Matrix 読取タイムアウト";
-      $("resultDm").textContent = firstDM ? firstDM.text : "-";
-      $("resultQr").textContent = secondQR ? secondQR.text : "-";
-      $("resultDmMeta").textContent = mgmt ? `種別=${matrixProfile ? matrixProfile.label : "-"} / readLimit=${mgmt.readLimitBits}` : "";
-      $("resultQrMeta").textContent = secondQR && secondQR.version ? `version=${secondQR.version.versionNumber || secondQR.version}` : "第2QR未確定";
-      $("signatureCard").style.display = "none";
-      $("resultTrace").textContent = report;
-      $("resultScreen").style.display = "flex";
-      setScanUiActive(false);
-      $("startBtn").disabled = false;
-      $("stopBtn").disabled = true;
-    }
-
-    */
     function finishWithTimeout() {
       if (!isScanning && !isProcessing) return;
       isScanning = false;
@@ -604,8 +394,6 @@
       drawOverlay();
       setStatus("20s timeout");
       recordEvent("timeout");
-      const report = buildDebugReport("timeout");
-      saveDebugLog("timeout", report);
       const mgmt = firstDM ? parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16) : null;
       $("resultTitle").textContent = "QR Matrix timeout";
       $("resultDm").textContent = firstDM ? firstDM.text : "-";
@@ -614,19 +402,14 @@
       $("resultDmMeta").textContent = mgmt ? `profile=${matrixProfile ? matrixProfile.label : "-"} / readLimit=${mgmt.readLimitBits}` : "";
       $("resultQrMeta").textContent = secondQR && secondQR.version ? `version=${secondQR.version.versionNumber || secondQR.version}` : "M2 QR not fixed";
       $("signatureCard").style.display = "none";
-      $("resultTrace").textContent = report;
+      renderResultImage(null, null);
       $("resultScreen").style.display = "flex";
       setScanUiActive(false);
       $("startBtn").disabled = false;
-      $("stopBtn").disabled = true;
     }
 
     function setStatus(text) { $("statusText").textContent = text; }
-    function setStage(active) {
-      $("stage1Pill").classList.toggle("active", active === "stage1");
-      $("prePill").classList.toggle("active", active === "pre");
-      $("stage3Pill").classList.toggle("active", active === "stage3");
-    }
+    function setStage() {}
     function setScanUiActive(active) {
       document.body.classList.toggle("scanning", !!active);
       const controls = $("cameraControls");
@@ -664,6 +447,7 @@
         hasDateTime: (low & 0x0200) !== 0,
         hasExpiry: (low & 0x0100) !== 0,
         hasReaderId: (low & 0x0080) !== 0,
+        hasImageId: (low & 0x0040) !== 0,
         hasLocation: (low & 0x0020) !== 0,
         hasMunicipality: (low & 0x0010) !== 0,
         readLimitBits: (low >>> 2) & 0x3
@@ -1778,6 +1562,37 @@
       setStatus("パスワード入力待ち");
     }
 
+    function renderResultImage(item, mgmt) {
+      const container = $("resultImageContainer");
+      const image = $("resultImage");
+      if (!container || !image) return;
+
+      image.onload = null;
+      image.onerror = null;
+      image.removeAttribute("src");
+      image.alt = "";
+      container.style.display = "none";
+
+      const imageDataId = Number(item && item.managementExt32);
+      if (!mgmt || !mgmt.hasImageId || !Number.isInteger(imageDataId) || imageDataId < 1 || imageDataId > 10) return;
+
+      let usingJpegFallback = false;
+      image.onload = () => { container.style.display = "block"; };
+      image.onerror = () => {
+        if (!usingJpegFallback) {
+          usingJpegFallback = true;
+          image.src = `ID${imageDataId}.jpg`;
+          return;
+        }
+        image.onload = null;
+        image.onerror = null;
+        image.removeAttribute("src");
+        container.style.display = "none";
+      };
+      image.alt = `画像データ ID${imageDataId}`;
+      image.src = `ID${imageDataId}.png`;
+    }
+
     function showConditionRejected(message) {
       isScanning = false;
       isProcessing = false;
@@ -1786,8 +1601,6 @@
       drawOverlay();
       setScanUiActive(false);
       recordEvent(`condition rejected: ${message}`);
-      const report = buildDebugReport("rejected");
-      saveDebugLog("rejected", report);
       const mgmt = firstDM ? parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16) : null;
       $("resultTitle").textContent = "QR Matrix 条件不一致";
       $("resultDm").textContent = firstDM ? firstDM.text : "-";
@@ -1798,10 +1611,9 @@
         : "";
       $("resultQrMeta").textContent = message || "読取条件を満たしていません";
       $("signatureCard").style.display = "none";
-      $("resultTrace").textContent = report;
+      renderResultImage(null, null);
       $("resultScreen").style.display = "flex";
       $("startBtn").disabled = false;
-      $("stopBtn").disabled = true;
     }
 
     function showResult(signature = null) {
@@ -1813,8 +1625,6 @@
       const outcome = signature ? (signature.verified ? "completed_verified" : "completed_signature_failed") : "completed";
       recordEvent(outcome);
       if (firstDM) recordReadCountIfNeeded(firstDM);
-      const report = buildDebugReport(outcome);
-      saveDebugLog(outcome, report);
       const mgmt = firstDM ? parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16) : null;
       $("resultTitle").textContent = signature ? "QR Matrix 電子署名結果" : "QR Matrix 読取結果";
       $("resultDm").textContent = firstDM ? firstDM.text : "-";
@@ -1822,7 +1632,7 @@
       $("resultDmMeta").textContent = mgmt ? `種別=${matrixProfile ? matrixProfile.label : "-"} / readLimit=${mgmt.readLimitBits}` : "";
       $("resultQrCard").style.display = signature ? "none" : "";
       $("resultQrMeta").textContent = secondQR && secondQR.version ? `version=${secondQR.version.versionNumber || secondQR.version}` : "";
-      $("resultTrace").textContent = report;
+      renderResultImage(firstDM, mgmt);
       if (signature) {
         $("signatureCard").style.display = "";
         $("signatureText").innerHTML = signature.verified
@@ -1834,7 +1644,6 @@
       $("resultScreen").style.display = "flex";
       setScanUiActive(false);
       $("startBtn").disabled = false;
-      $("stopBtn").disabled = true;
     }
 
     async function startCamera() {
@@ -1933,74 +1742,10 @@
       scanStartedPerf = performance.now();
       scanStartedIso = debugStats.startedIso;
       debugSavedForCurrentScan = false;
+      renderResultImage(null, null);
       octx.clearRect(0, 0, overlay.width, overlay.height);
     }
 
-    /*
-    async function startScan() {
-      if (!window.jsQR || !jsQR.decodeQRMatrix) {
-        alert("jsQR.js のQR Matrix拡張が読み込まれていません。");
-        return;
-      }
-      await startCamera();
-      resetScanState();
-      $("resultScreen").style.display = "none";
-      $("passwordScreen").style.display = "none";
-      $("startBtn").disabled = true;
-      $("stopBtn").disabled = false;
-      isScanning = true;
-      isProcessing = false;
-      setStatus("Stage1: DM部を探索中...");
-      recordEvent("scan start");
-      startScanTimeout();
-      requestAnimationFrame(handleFrame);
-    }
-
-    function stopScan() {
-      isScanning = false;
-      isProcessing = false;
-      clearScanTimeout();
-      setStage(null);
-      setStatus("停止しました");
-      $("startBtn").disabled = false;
-      $("stopBtn").disabled = true;
-    }
-
-    $("startBtn").addEventListener("click", startScan);
-    $("stopBtn").addEventListener("click", stopScan);
-    $("copyLogsBtn").addEventListener("click", copyAllDebugLog);
-    $("clearLogsBtn").addEventListener("click", clearDebugLog);
-    $("loginBtn").addEventListener("click", doLogin);
-    $("logoutBtn").addEventListener("click", doLogout);
-    $("modeSwitchBtn").addEventListener("click", () => {
-      $("resultScreen").style.display = "none";
-      $("passwordScreen").style.display = "none";
-      stopScan();
-    });
-    $("cameraScanAgainBtn").addEventListener("click", () => {
-      $("resultScreen").style.display = "none";
-      $("passwordScreen").style.display = "none";
-      startScan();
-    });
-    $("zoomOutBtn").addEventListener("click", () => changeZoom(-1));
-    $("zoomInBtn").addEventListener("click", () => changeZoom(1));
-    $("scanAgainBtn").addEventListener("click", () => { $("resultScreen").style.display = "none"; startScan(); });
-    $("passwordCancelBtn").addEventListener("click", () => { $("passwordScreen").style.display = "none"; stopScan(); });
-    $("passwordOkBtn").addEventListener("click", async () => {
-      const pw = $("passwordInput").value;
-      if (!pw) { alert("パスワードを入力してください。"); return; }
-      $("passwordScreen").style.display = "none";
-      setStatus("パスワードマスク生成中...");
-      appMask = await deriveMaskFromPassword(pw, 5000, firstDM && firstDM.creationDateTimeExt32);
-      matrixProfile = buildMatrixProfile(parseStandardMgmt(firstDM.managementCode32 ?? firstDM.managementCode, firstDM.managementFlags16));
-      isScanning = true;
-      isProcessing = false;
-      setScanUiActive(true);
-      recordEvent("password mask generated; resume scan");
-      startScanTimeout();
-      requestAnimationFrame(handleFrame);
-    });
-    */
     async function startScan() {
       if (!window.jsQR || !jsQR.decodeQRMatrix) {
         alert("jsQR.js QR Matrix extension is not loaded.");
@@ -2012,7 +1757,6 @@
       $("resultScreen").style.display = "none";
       $("passwordScreen").style.display = "none";
       $("startBtn").disabled = true;
-      $("stopBtn").disabled = false;
       isScanning = true;
       isProcessing = false;
       setScanUiActive(true);
@@ -2030,13 +1774,9 @@
       setScanUiActive(false);
       setStatus("Stopped");
       $("startBtn").disabled = false;
-      $("stopBtn").disabled = true;
     }
 
     $("startBtn").addEventListener("click", startScan);
-    $("stopBtn").addEventListener("click", stopScan);
-    $("copyLogsBtn").addEventListener("click", copyAllDebugLog);
-    $("clearLogsBtn").addEventListener("click", clearDebugLog);
     $("loginBtn").addEventListener("click", doLogin);
     $("logoutBtn").addEventListener("click", doLogout);
     $("modeSwitchBtn").addEventListener("click", () => {
@@ -2070,7 +1810,6 @@
       requestAnimationFrame(handleFrame);
     });
     initLogin();
-    updateDebugLogCount();
   </script>
 </body>
 </html>
