@@ -1,14 +1,16 @@
 {
-  "name": "QRツイン リーダー",
-  "short_name": "QRツイン",
+  "name": "QRマトリックス リーダー",
+  "short_name": "QRマトリックス",
+  "id": "./",
   "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
-  "background_color": "#121212",
-  "theme_color": "#121212",
+  "background_color": "#101416",
+  "theme_color": "#101416",
   "icons": [
     {
       "src": "./icon.png",
-      "sizes": "192x192 512x512",
+      "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
     }
